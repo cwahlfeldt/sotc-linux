@@ -1,0 +1,16 @@
+{
+    "cmake.sourceDirectory": "/home/waffles/code/ShadowOfTheColossus-PC/gpu",
+    "files.watcherExclude": {
+        "**/out/**": true
+    },
+    "search.exclude": {
+        "**/out": true
+    },
+    "C_Cpp.files.exclude": {
+        "**/out": true
+    },
+    "search.followSymlinks": false,
+    "python.analysis.exclude": [
+        "**/out"
+    ]
+}

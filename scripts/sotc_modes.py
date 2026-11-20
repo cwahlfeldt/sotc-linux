@@ -1,0 +1,301 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+"""sotc: game modes and engine settings for Shadow of the Colossus EU 1.01 (CUSA08809) and US 1.00
+(CUSA08034), the same eboot build.
+
+    python scripts/sotc_modes.py GAME --out out --modes af16,fps60 --cvars "r_motionBlurEnable=0 ..."
+
+Writes two files for the loader:
+  out/patches.bin  code patches (BBPATCH2, bb-probe --patches):
+                   fps60  removes the game's 30 FPS cap (illusion's GoldHEN patch, the shadPS4
+                          SotC fork's "SotC-Modes")
+                   fps60game  the game's own 60 FPS target (PS4 Pro Performance mode): it asks for
+                          60 FPS and its timing follows
+                   --render WxH (e.g. 3840x1600)  the game renders at this size instead of
+                          1920x1080, with its aspect for the cameras (Hor+: a wider view, not a
+                          stretched one); PS4 mode only, the PS4 Pro path keeps its sizes
+  out/cmdline.bin  the engine command line the game appends to its own (SOTCCMD1,
+                   bb-probe --sotc-cmdline): cvars of the Bluepoint engine, e.g.
+                   +r_motionBlurEnable=0. Modes that are only cvars:
+                   af16   16x anisotropic filtering on every texture
+                   hdr    the game's HDR rendering (needs the HDR10 output: Windows HDR on)
+The original bytes are checked first: another game version gets neither file's changes.
+"""
+import argparse
+import os
+import re
+from pathlib import Path
+import struct
+from prepare import parse_self, sfo
+
+# The supported releases: title ID -> (region, version shown). The EU 1.01 update has no eboot
+# (only Arabic text), so both run the same eboot, byte for byte in code and data.
+GAMES = {'CUSA08809': ('EU', '01.01'), 'CUSA08034': ('US', '01.00')}
+SUPPORTED = 'EU 1.01 / US 1.00'
+BASE = 0x400000
+# The lea that loads the string the game appends to its command line ("+VSyncWindow=10%").
+CMDLINE_LEA = 0x009367b9
+CMDLINE_ORIGINAL = '+VSyncWindow=10%'
+# Code patches: mode -> [(address, expected original bytes, new bytes)]
+MODES = {
+    'fps60': [
+        # the frame limiter's import stub (sceVideoOutSetFlipRate) returns 0
+        (0x01390090, bytes.fromhex('ff25a20567'), bytes.fromhex('31c0c3')),
+    ],
+    # Room for 4x the grass, for the longer grass distances: the virtual geometry buffers (80-byte
+    # blades and their index list) hold 0x18000; the grass compute drops every blade past that, the
+    # farthest patches first: a band of grass pops in and out ahead once the grass distance is raised.
+    'grassbuf': [
+        (0x004d92b9, bytes.fromhex('b900800100'), bytes.fromhex('b900000600')),
+        (0x004d92e5, bytes.fromhex('b900800100'), bytes.fromhex('b900000600')),
+        # the patch chunks (up to 64 blades each) the grass compute fills: 0x8000 of 16 bytes
+        (0x004d928d, bytes.fromhex('b900800000'), bytes.fromhex('b900000200')),
+        # the weed blades (80 bytes): 0x24000
+        (0x004d9311, bytes.fromhex('b900400200'), bytes.fromhex('b900000900')),
+    ],
+    # The engine's own 60 FPS target, the one of the PS4 Pro Performance mode: TargetFramesPerSeconds
+    # 1 (60 FPS) where the game sets 2 (30 FPS), i.e. the graphics mode code on a PS4 (0x70a6d0) and
+    # the options code without the Performance mode (0x49a2d8). The game then asks flip rate 0 itself
+    # and its timing code (display+0x28: 59.94 instead of 29.97) keeps step: without it, some physics
+    # and timers run twice as fast at 60 FPS (AjncSystem #100, #120, #49).
+    'fps60game': [
+        (0x00b0a7a6, bytes.fromhex('c745b802000000'), bytes.fromhex('c745b801000000')),
+        (0x0089a47f, bytes.fromhex('c7458402000000'), bytes.fromhex('c7458401000000')),
+        (0x0089a499, bytes.fromhex('c7458002000000'), bytes.fromhex('c7458001000000')),
+        # The PS4 Pro path of the same graphics mode code: Cinematic (mode 2) sets 2 there, so in
+        # Pro mode the game ran at 60 FPS on a 30 FPS clock and physics ran twice as fast: the 5th
+        # colossus (Avion) flew up forever (#421, #425); its Performance mode (1) was fine.
+        (0x00b0a886, bytes.fromhex('c745c802000000'), bytes.fromhex('c745c801000000')),
+    ],
+}
+# Modes made of cvars only.
+CVAR_MODES = {
+    'fps60game': ['TargetFramesPerSeconds=1'],  # until the options code runs (MODES above)
+    'af16': ['progSamplerAnisoLevel=16', 'progSamplerAnisoLevel_BasePS4=16', 'progSamplerAnisoLevel_Perf=16',
+             'progSamplerAnisoLevel_Cinematic=16', 'linearSamplerAnisoLevel=16'],
+    # the game's HDR path (sotc.py also turns on the HDR10 output, BB_HDR): r_WantsHDR_Game is
+    # its menu option (2 = on); r_WantsHDR=0 leaves the switch to that menu
+    'hdr': ['r_WantsHDR=0', 'r_WantsHDR_Game=2'],
+}
+# Render size (PS4 mode; the PS4 Pro values next to them stay): (address, kind, original).
+# 'W'/'H' an integer immediate (the last 4 bytes of the instruction at address), 'w'/'h' a float
+# (the PS4 entry of a [PS4, Pro] table), 'w2'/'h2' half of it, 'a' the aspect float W/H,
+# 'P' the render target pool (322.5 MiB at 1080p, scaled by the pixel count), 'v' the width of a
+# 1080 line canvas of the render's aspect (1080 * W/H).
+# Page allocator (0x41a1e0): it carves a new chunk only when the free-page tally at pool+0x74 is
+# 0, and the tally drifts above the bitmap's real free count. With the bitmap empty and the tally
+# not 0, the scan found no bit and read bitmap[-1] (crash at 0x41a371). On a failed scan: tally 0,
+# then carve a chunk (0x41a1f1, needs eax 0) and scan again.
+POOL_FIX = (0x41a321, bytes.fromhex('eb34666666662e0f1f840000000000'),
+            bytes.fromhex('41c7467400000000' '31c0' 'e9c1feffff'))
+# Above this many rendered pixels the larger render target pool pushes the game's free system
+# memory figure under texturePoolReserveSystemMemMiBs (220), and the texture streamer drops every
+# texture to mip 3 every second or so (fine textures flicker). Reserve 0 there; it needs POOL_FIX.
+LOW_MEM_PIXELS = 4_200_000
+RENDER_SITES = [
+    # display init (0x495a90): back buffer, display targets, scene size. The display object's
+    # aspect (0x495b3e, WIDE_ASPECT) is added in render_patches: the 3D scene and the HUD's health
+    # bar both read it.
+    (0x00495bec, 'H', 'b938040000'), (0x00495bf7, 'W', 'b880070000'),
+    (0x00495c91, 'W', 'ba80070000'), (0x00495c96, 'H', 'b938040000'),
+    (0x00495d34, 'W', 'ba80070000'), (0x00495d39, 'H', 'b938040000'),
+    (0x00495d61, 'W', 'b880070000'), (0x00495d7c, 'H', 'b938040000'),
+    # the render target allocator: its check for the PS4 size, its pool (PS4 Pro: 573 MiB)
+    (0x0049b693, 'W', '3d80070000'), (0x0049b6c6, 'H', '817c242038040000'),
+    (0x0049b74f, 'P', 'be00002814'),
+    # render target sizes
+    (0x004a2ae9, 'W', '41be80070000'), (0x004a2af2, 'H', '41bf38040000'),
+    # display width / height getters
+    (0x0056f2f3, 'W', 'b880070000'), (0x0056f313, 'H', 'b838040000'),
+    (0x00662ac6, 'W', 'c705109ac80280070000'), (0x00662ad0, 'H', 'c7050a9ac80238040000'),
+    # viewport descriptors {W, H, ...}
+    (0x00ab5888, 'W', 'c7054a2db80280070000'), (0x00ab5899, 'H', 'c7053d2db80238040000'),
+    (0x00ab5978, 'W', 'c70780070000'), (0x00ab597e, 'H', 'c7470438040000'),
+    (0x00ab6001, 'W', 'c70080070000'), (0x00ab6007, 'H', 'c7400438040000'),
+    # float tables [PS4, Pro]: pixel sizes and screen centres
+    (0x013c34a0, 'w', '0000f044'), (0x013c34a8, 'h', '00008744'),
+    (0x013d7518, 'w', '0000f044'), (0x013d7520, 'h', '00008744'),
+    (0x01667f14, 'w', '0000f044'), (0x01667f1c, 'h', '00008744'),
+    (0x01667f24, 'w', '0000f044'), (0x01667f2c, 'h', '00008744'),
+    (0x01667f34, 'w', '0000f044'), (0x01667f3c, 'h', '00008744'),
+    (0x01667f44, 'w2', '00007044'), (0x01667f4c, 'w2', '00007044'),
+    (0x01667f54, 'w', '0000f044'), (0x01667f5c, 'h', '00008744'),
+    (0x01667f64, 'w2', '00007044'), (0x01667f6c, 'h2', '00000744'),
+    (0x01667f74, 'w2', '00007044'), (0x01667f7c, 'h2', '00000744'),
+    (0x01667f84, 'w', '0000f044'), (0x01667f8c, 'h', '00008744'),
+    (0x01667f94, 'w2', '00007044'), (0x01667f9c, 'h2', '00000744'),
+    # the default camera's aspect (16/9)
+    (0x0166633c, 'a', '398ee33f'),
+    # HUD gauges: {0, 0, 1920.0, h} rectangles the stamina bar's fill is laid out in, in units of a
+    # 1080 line canvas ('v': 1080 * W/H, not the render width: with DLSS the render is smaller and
+    # the bar broke again). Left at 1920 the yellow bar stopped short of the grip circle in 21:9
+    # and filled the wrong way (#301, found with SOTC_RENDER_EXTRA and the user's tests, 26 Oct).
+    (0x008e2cf1, 'v', 'c78550feffff0000f044'),
+    (0x00920309, 'v', 'c78560feffff0000f044'),
+]
+WIDE_ASPECT = (0x00495b3e, 'a', 'c74304398ee33f')  # the display object's aspect (16/9)
+RT_POOL = 0x14280000
+# EU 1.01 / US 1.00: the command line lea and the fps60 site.
+VERSION_CHECKS = [(CMDLINE_LEA, bytes.fromhex('488d352debad00')), (0x01390090, bytes.fromhex('ff25a20567'))]
+CVAR = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*((=[-+.0-9A-Za-z_%]+)|(\([-+.0-9A-Za-z_,% ]*\)))?$')  # NAME=VALUE, NAME(ARGS) or a flag such as nointro
+
+
+def image_bytes(elf, ph, vaddr, length):
+    for p in ph:
+        if p['type'] in (1, 0x61000010) and p['vaddr'] <= vaddr and vaddr + length <= p['vaddr'] + p['filesz']:
+            offset = p['offset'] + vaddr - p['vaddr']
+            return bytes(elf[offset:offset + length])
+    return None
+
+
+def title_id(game):
+    """TITLE_ID of the game folder's sce_sys/param.sfo, '' without one."""
+    try:
+        return str(sfo((Path(game) / 'sce_sys' / 'param.sfo').read_bytes()).get('TITLE_ID', ''))
+    except (OSError, ValueError):
+        return ''
+
+
+def game_serial(game):
+    """The supported title ID of a game folder; CUSA08809 (EU) when it can't be read."""
+    serial = title_id(game)
+    return serial if serial in GAMES else next(iter(GAMES))
+
+
+def save_template(root, serial):
+    """The save folder of the game serial in root (<root>/<serial>), else the other release's
+    (EU and US run the same build, so their saves are expected to load in either); None."""
+    for candidate in (serial, *GAMES):
+        if (Path(root) / candidate).is_dir():
+            return Path(root) / candidate
+    return None
+
+
+def is_supported(elf, ph):
+    return all(image_bytes(elf, ph, address - BASE, len(original)) == original for address, original in VERSION_CHECKS)
+
+
+def render_pool(w, h):
+    """The render target pool for WxH: the PS4 one (1080p) scaled by the pixels, 64 KiB pages."""
+    pool = max(RT_POOL, RT_POOL * w * h // (1920 * 1080))
+    return (pool + 0xffff) & ~0xffff
+
+
+def is_wide(w, h):
+    """True for a WxH wider than 16:9 by more than 2% (the launcher's is_wide)."""
+    return w * 9 > h * 16 * 1.02
+
+
+def render_patches(elf, ph, size):
+    """The writes for render size WxH; SystemExit when a site does not hold the expected bytes."""
+    match = re.fullmatch(r'(\d+)x(\d+)', size)
+    if not match:
+        raise SystemExit(f'bad render size {size!r} (WxH, e.g. 3840x1600)')
+    w, h = int(match[1]), int(match[2])
+    if not (640 <= w <= 7680 and 360 <= h <= 4320) or w % 8 or h % 8:
+        raise SystemExit(f'render size {size}: 640x360 to 7680x4320, multiples of 8')
+    values = {'W': struct.pack('<I', w), 'H': struct.pack('<I', h), 'w': struct.pack('<f', w),
+              'h': struct.pack('<f', h), 'w2': struct.pack('<f', w / 2), 'h2': struct.pack('<f', h / 2),
+              'a': struct.pack('<f', w / h), 'P': struct.pack('<I', render_pool(w, h)),
+              'v': struct.pack('<f', 1080 * w / h)}
+    writes = []
+    # SOTC_RENDER_KEEP=<addr>,<addr>: sites left at the 1920x1080 value (finding the HUD's sites,
+    # #301: health and stamina bars stretched in 21:9).
+    keep = {int(a, 16) for a in os.environ.get('SOTC_RENDER_KEEP', '').replace(' ', ',').split(',') if a}
+    sites = list(RENDER_SITES)
+    # The display object's aspect also sets the 3D scene's: left at 16:9 (C2, for #301) the scene
+    # was the 16:9 image stretched sideways in 21:9 and 32:9 (#327, #331, #341; the moon of the
+    # opening is not round). On by default above 16:9; the health bar's grey stub in 21:9 (#301)
+    # comes back with it. SOTC_WIDE_ASPECT=0 keeps 16:9 (stretched scene, no stub).
+    if os.environ.get('SOTC_WIDE_ASPECT', '1' if is_wide(w, h) else '0') == '1':
+        sites.append(WIDE_ASPECT)
+    for address, kind, original in sites:
+        original = bytes.fromhex(original)
+        if image_bytes(elf, ph, address - BASE, len(original)) != original:
+            raise SystemExit(f'render size: unexpected bytes at {address:#x}')
+        if address in keep:
+            print(f'Render size: {address:#x} kept at 1920x1080')
+            continue
+        data = values[kind]
+        writes.append((address - BASE + len(original) - len(data), data))
+    # SOTC_RENDER_EXTRA=<addr>,<addr>: more 4-byte floats of 1920/960/1080/540 to scale (finding
+    # the stamina bar's site, #301).
+    extra = {1920.0: 'w', 960.0: 'w2', 1080.0: 'h', 540.0: 'h2'}
+    for a in os.environ.get('SOTC_RENDER_EXTRA', '').replace(' ', ',').split(','):
+        if not a:
+            continue
+        address = int(a, 16)
+        current = struct.unpack('<f', image_bytes(elf, ph, address - BASE, 4))[0]
+        if current not in extra:
+            raise SystemExit(f'render size: {address:#x} holds {current}, not 1920/960/1080/540')
+        writes.append((address - BASE, values[extra[current]]))
+        print(f'Render size: {address:#x} {current:g} scaled too')
+    return writes
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('game', type=Path)
+    parser.add_argument('--out', type=Path, default=Path(__file__).resolve().parent.parent / 'out')
+    parser.add_argument('--modes', default='', help='comma-separated: ' + ', '.join([*MODES, *CVAR_MODES]))
+    parser.add_argument('--cvars', default='', help='engine cvars NAME=VALUE separated by spaces')
+    parser.add_argument('--render', default='', help='render size WxH instead of 1920x1080, e.g. 3840x1600')
+    args = parser.parse_args()
+    elf, _, ph, _, _ = parse_self((args.game / 'eboot.bin').read_bytes())
+    supported = is_supported(elf, ph)
+    writes, cvars = [], []
+    if supported and image_bytes(elf, ph, POOL_FIX[0] - BASE, len(POOL_FIX[1])) == POOL_FIX[1]:
+        writes.append((POOL_FIX[0] - BASE, POOL_FIX[2]))
+    for mode in filter(None, (m.strip().lower() for m in args.modes.split(','))):
+        if mode not in MODES and mode not in CVAR_MODES:
+            raise SystemExit(f'unknown mode {mode!r} (known: {", ".join([*MODES, *CVAR_MODES])})')
+        if not supported:
+            print(f'Mode {mode}: this eboot is not {SUPPORTED}, not applied')
+            continue
+        writes += [(address - BASE, data) for address, _, data in MODES.get(mode, [])]
+        cvars += CVAR_MODES.get(mode, [])
+        print(f'Mode {mode}: on')
+    if args.render and args.render != '1920x1080':
+        if supported:
+            writes += render_patches(elf, ph, args.render)
+            print(f'Render size {args.render}: on')
+            w, h = map(int, args.render.split('x'))
+            if w * h > LOW_MEM_PIXELS and (POOL_FIX[0] - BASE, POOL_FIX[2]) in writes:
+                cvars.append('texturePoolReserveSystemMemMiBs=0')
+        else:
+            print(f'Render size {args.render}: this eboot is not {SUPPORTED}, not applied')
+    # sotc: PS4 Pro mode too (SOTC_NEO=1): its larger render targets push the game's free system
+    # memory figure under the reserve as well, and with Maximum textures the streamer's constant
+    # drops showed as colour garbage after loads (user, 26 Oct: 1 hour without a crash or
+    # garbage outside two areas with it). SOTC_POOL_RESERVE=0/1 forces the reserve off/on.
+    pool_fix = (POOL_FIX[0] - BASE, POOL_FIX[2]) in writes
+    reserve = os.environ.get('SOTC_POOL_RESERVE', '')
+    reserve_off = 'texturePoolReserveSystemMemMiBs=0' in cvars
+    if pool_fix and not reserve_off and reserve != '1' and (
+            reserve == '0' or os.environ.get('SOTC_NEO') == '1'):
+        cvars.append('texturePoolReserveSystemMemMiBs=0')
+        reserve_off = True
+    elif reserve_off and reserve == '1':
+        cvars.remove('texturePoolReserveSystemMemMiBs=0')
+        reserve_off = False
+    if reserve_off:
+        print('Texture pool reserve: 0 (page allocator fix on)')
+    for item in args.cvars.split():
+        item = item.lstrip('+')
+        if not CVAR.match(item):
+            raise SystemExit(f'bad cvar {item!r} (NAME=VALUE or NAME)')
+        cvars.append(item)
+    blob = struct.pack('<8sQQ', b'BBPATCH2', BASE, len(writes))
+    for offset, data in writes:
+        blob += struct.pack('<QQ', offset, len(data)) + data
+    (args.out / 'patches.bin').write_bytes(blob)
+    cmdline = args.out / 'cmdline.bin'
+    if supported and cvars:
+        text = ' '.join([CMDLINE_ORIGINAL, *('+' + c for c in cvars)])
+        cmdline.write_bytes(struct.pack('<8sQ', b'SOTCCMD1', CMDLINE_LEA - BASE) + text.encode('ascii'))
+    elif cmdline.exists():
+        cmdline.unlink()
+
+
+if __name__ == '__main__':
+    main()

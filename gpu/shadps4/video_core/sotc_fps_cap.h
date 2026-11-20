@@ -1,0 +1,106 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// sotc: the game's 30 FPS cap, switchable while playing (F7, bbport_overlay.cpp).
+//
+// The game caps itself with sceVideoOutSetFlipRate(1): one flip at most every 2 vblanks of 60 Hz.
+// Its frame logic follows the real time, so ignoring that rate uncaps it, as the fps60 code patch
+// does (sotc_modes.py, the import stub returns at once). Here the rate the game asks is kept and
+// the vblank thread (VideoOutDriver::PresentThread) applies it or not. SOTC_FPS_CAP=off starts
+// uncapped (the launcher's "Uncapped FPS"), 30 or unset capped. Uncapped needs vblanks at 120 Hz
+// (BB_VBLANK_HZ=120, set by the launcher and sotc.py), else a frame still waits for a 60 Hz one.
+
+#pragma once
+
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+
+namespace SotcFpsCap {
+
+inline std::atomic<bool> uncapped{[] {
+    const char* v = std::getenv("SOTC_FPS_CAP");
+    return v && (v[0] == 'o' || v[0] == 'O' || v[0] == '0');
+}()};
+
+/// Uncapped frame limit set by the in-game menu: 60, 0 (unlimited), -1 the start's (SOTC_FPS_LIMIT).
+inline std::atomic<int> limit_fps{-1};
+
+/// sotc: SOTC_FPS_DYNAMIC=<fps> (dynamic FPS, as some emulators do for games with a 60/30 mode):
+/// with the 60 FPS limit, when the game cannot keep 60 for 1.5 s the limit drops to <fps> (40 on a
+/// 120 Hz screen, 30 on 60 Hz, any value with G-Sync/FreeSync), steady instead of swinging between
+/// 45 and 60; every 10 s it tries 60 again for 2 s and stays when the game keeps up. The game's
+/// logic follows the real time, so a lower limit does not slow it down. 0 or unset: off.
+inline const int dynamic_low = [] {
+    const char* v = std::getenv("SOTC_FPS_DYNAMIC");
+    const long n = v ? std::strtol(v, nullptr, 10) : 0;
+    return n > 0 && n < 60 ? int(n) : 0;
+}();
+/// The limit the dynamic FPS applies now: 0 = the normal limit (60), else dynamic_low.
+inline std::atomic<int> dynamic_limit{0};
+
+/// The flip rate the game asked, -1 while it asked none (with the fps60 code patch it never does).
+inline std::atomic<int> game_rate{-1};
+
+/// Uncapped flip pacing (videoout driver.cpp): flips released at the game's own rate (true) or on
+/// the vblank grid (false). F6 switches it while playing; SOTC_FLIP_PACER=0 starts on the grid.
+inline std::atomic<bool> flip_pacer{[] {
+    const char* v = std::getenv("SOTC_FLIP_PACER");
+    return !v || v[0] != '0';
+}()};
+
+/// F6: the game's own rate <-> the vblank grid. Returns true when now paced.
+inline bool TogglePacer() {
+    const bool now = !flip_pacer.load(std::memory_order_relaxed);
+    flip_pacer.store(now, std::memory_order_relaxed);
+    std::fprintf(stderr, "SOTC FLIP PACER: %s\n", now ? "game rate" : "vblank grid");
+    return now;
+}
+
+/// The flip rate the vblank thread applies.
+inline int EffectiveRate() {
+    if (uncapped.load(std::memory_order_relaxed)) {
+        return 0;
+    }
+    // sotc: capped means 30 FPS even when the game asks for no limit (rate 0: PS4 Pro mode, or its
+    // 60 FPS target): "30" in the menu or on F7 had no effect there (user, 27 Oct, 42 FPS at "30").
+    const int rate = game_rate.load(std::memory_order_relaxed);
+    return rate > 0 ? rate : 1;
+}
+
+/// fps60game mode (scripts/sotc_modes.py): where the engine keeps the pointer to its
+/// TargetFramesPerSeconds value (1 = 60 FPS, 2 = 30), set by the loader.
+inline std::atomic<void*> target_slot{};
+
+/// F7: capped <-> uncapped. Returns true when now uncapped. With fps60game the game targets 60 FPS
+/// itself, so F7 sets its target: the rate it asks and its timing (60 Hz or 30 Hz steps) follow.
+inline bool Toggle() {
+    const bool now = !uncapped.load(std::memory_order_relaxed);
+    uncapped.store(now, std::memory_order_relaxed);
+    if (void* slot = target_slot.load(std::memory_order_relaxed)) {
+        if (int* value = *static_cast<int**>(slot)) {
+            *value = now ? 1 : 2;
+        }
+    }
+    std::fprintf(stderr, "SOTC FPS CAP: %s\n", now ? "uncapped" : "capped");
+    return now;
+}
+
+/// Present thread, at each game frame: SOTC_FPS_CAP_TEST_CYCLE=<seconds> toggles like F7 that
+/// often (scripted tests).
+inline void TestTick() {
+    static const double every = [] {
+        const char* v = std::getenv("SOTC_FPS_CAP_TEST_CYCLE");
+        return v ? std::atof(v) : 0.0;
+    }();
+    if (every <= 0.0) {
+        return;
+    }
+    static auto last = std::chrono::steady_clock::now();
+    const auto now = std::chrono::steady_clock::now();
+    if (std::chrono::duration<double>(now - last).count() >= every) {
+        last = now;
+        Toggle();
+    }
+}
+
+} // namespace SotcFpsCap
