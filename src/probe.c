@@ -1874,6 +1874,8 @@ static int helper_single_step(ucontext_t *uc) {
 #include <errno.h>
 #include <linux/perf_event.h>
 #include <linux/hw_breakpoint.h>
+#if defined(TRAP_PERF) && defined(PERF_ATTR_SIZE_VER7) /* sigtrap: Linux 5.13 headers, glibc 2.34 */
+#define SOTC_WATCH 1
 static void watch_setup(void) {
     const char *v=getenv("SOTC_WATCH_ADDR");
     for (int n=0; v && *v && n<4; ++n) {
@@ -1921,6 +1923,11 @@ static void watch_hit(siginfo_t *info, ucontext_t *uc) {
     }
     write_text("\n");
 }
+#else
+static void watch_setup(void) {
+    if (getenv("SOTC_WATCH_ADDR")) fputs("SOTC_WATCH_ADDR: not in this build (older Linux headers)\n",stderr);
+}
+#endif
 static _Thread_local int fault_depth;
 static void resume_at(sigjmp_buf *buffer, int sig) {
     sigset_t unblock;
@@ -1931,7 +1938,9 @@ static void resume_at(sigjmp_buf *buffer, int sig) {
 }
 static void fault(int sig, siginfo_t *info, void *context) {
     ucontext_t *uc = context;
+#ifdef SOTC_WATCH
     if (sig == SIGTRAP && info->si_code == TRAP_PERF) { watch_hit(info, uc); return; } /* SOTC_WATCH_ADDR */
+#endif
     if (sig == SIGTRAP) {
         const int trace = info->si_code == TRAP_TRACE;
         if (helper_single_step(uc) || heap_hook_trap(uc, trace)) return;
@@ -2150,7 +2159,7 @@ static void *prefetch_thread(void *unused) {
     unsigned long long done=0;
     for (int i=0;i<count;++i) {
         char path[1400];
-        snprintf(path,sizeof(path),"%s/%s",prefetch_dir,names[i]);
+        if ((size_t)snprintf(path,sizeof(path),"%s/%s",prefetch_dir,names[i])>=sizeof(path)) continue;
         int f=open(path,O_RDONLY|O_CLOEXEC);
         if (f<0) continue;
         posix_fadvise(f,0,0,POSIX_FADV_SEQUENTIAL);
@@ -2276,7 +2285,11 @@ void runtime_restart(void) {
     TerminateProcess(GetCurrentProcess(),0);
 #else
     puts("Runtime: restarting through run.sh");
+#ifdef SYS_close_range
     syscall(SYS_close_range, 3u, ~0u, 0u);
+#else
+    for (int fd=3; fd<4096; ++fd) close(fd);
+#endif
     execlp("bash", "bash", "run.sh", (char *)NULL);
     perror("runtime_restart: exec");
     _exit(1);

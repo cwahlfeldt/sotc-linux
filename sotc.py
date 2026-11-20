@@ -12,6 +12,7 @@ Settings (environment variables, or sotc.ini beside this script as NAME=value li
                       libSceUlt.sprx (shadPS4's user/sys_modules). Without it a built-in mixer plays the sound.
                       These files are Sony firmware: they are never distributed with the port.
     SOTC_USER_DIR     saves, shader/pipeline caches; default ./user
+    SOTC_DATA_DIR     the folder of out/, user/ and sotc.ini when the port's is read-only (AppImage)
     SOTC_UPDATE_DIR   optional: the game update; by default <game>-UPDATE or <game>-patch next to
                       the dump (as shadPS4); its files take the place of the base game's
     SOTC_DLC_DIR      optional: the game's DLC (one folder per add-on with sce_sys/param.sfo,
@@ -46,6 +47,9 @@ import time
 
 PORT = Path(__file__).resolve().parent
 SCRIPTS = PORT / 'scripts'
+# SOTC_DATA_DIR: where out/ (the prepared image), user/ (saves, caches) and sotc.ini live when the
+# port's own folder is read-only (the Linux AppImage); default the port's folder.
+DATA = Path(os.environ.get('SOTC_DATA_DIR') or PORT).resolve()
 SYS_MODULES = ('libSceUlt.sprx', 'libSceNgs2.sprx')
 
 
@@ -55,7 +59,7 @@ def fail(message):
 
 
 def load_ini():
-    ini = PORT / 'sotc.ini'
+    ini = DATA / 'sotc.ini'
     if ini.is_file():
         for line in ini.read_text(encoding='utf-8', errors='replace').splitlines():
             line = line.strip()
@@ -191,11 +195,12 @@ def main():
     load_ini()
     env = os.environ
     os.chdir(PORT)
-    out = PORT / 'out'
-    out.mkdir(exist_ok=True)
+    out = DATA / 'out'
+    out.mkdir(parents=True, exist_ok=True)
     # The EU dump (CUSA08809) next to the port, else the US one (CUSA08034).
-    default = next((PORT.parent / g for g in ('CUSA08809', 'CUSA08034') if (PORT.parent / g / 'eboot.bin').is_file()),
-                   PORT.parent / 'CUSA08809')
+    default = next((base / g for base in dict.fromkeys((DATA.parent, PORT.parent, DATA))
+                    for g in ('CUSA08809', 'CUSA08034') if (base / g / 'eboot.bin').is_file()),
+                   DATA.parent / 'CUSA08809')
     game = Path(env.get('SOTC_GAME_DIR', default)).resolve()
     if not (game / 'eboot.bin').is_file():
         fail(f'No eboot.bin in {game}: set SOTC_GAME_DIR (environment or sotc.ini) to the CUSA08809 (EU) '
@@ -287,11 +292,11 @@ def main():
         clang64 = Path(env.get('MSYS2_ROOT', r'C:\msys64')) / 'clang64' / 'bin'
         if clang64.is_dir():
             env['PATH'] = f'{clang64}{os.pathsep}{env.get("PATH", "")}'
-    user = Path(env.get('SOTC_USER_DIR', PORT / 'user')).resolve()
+    user = Path(env.get('SOTC_USER_DIR', DATA / 'user')).resolve()
     user.mkdir(parents=True, exist_ok=True)
     env.setdefault('BB_GPU_USER_DIR', str(user))
     # Controls: key.<input>= / pad.<input>= lines of sotc.ini remap keys and buttons (src/runtime_pad.c).
-    env.setdefault('BB_CONFIG', str(PORT / 'sotc.ini'))
+    env.setdefault('BB_CONFIG', str(DATA / 'sotc.ini'))
     host = str
     wine = os.name != 'nt' and probe.suffix == '.exe'
     if wine:

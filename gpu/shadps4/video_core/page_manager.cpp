@@ -63,6 +63,9 @@ static u64 ImageBaseAddress() {
 #include <thread>
 #include <fcntl.h>
 #include <linux/userfaultfd.h>
+#ifndef UFFD_USER_MODE_ONLY
+#define UFFD_USER_MODE_ONLY 1 // sotc: Linux 5.11+, absent from older headers (Steam Runtime)
+#endif
 #include <poll.h>
 #include <sys/ioctl.h>
 #include <sys/syscall.h>

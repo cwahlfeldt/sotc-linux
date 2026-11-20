@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Shadow of the Colossus PC
+Comment=Native Linux port of the PS4 game (your own game dump is needed)
+Exec=AppRun
+Icon=sotc-pc
+Categories=Game;
+Terminal=false

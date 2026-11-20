@@ -45,6 +45,11 @@ instead (`build-linux.sh` cross build, under Wine or Steam's Proton, prefix
 heap guard SIGTRAP hook, null-object skips, copy guard, helper reads, SSE4a fallback) mirrors
 `vectored_fault_impl`: a game fix added to one belongs in the other. Diagnostic:
 `SOTC_WATCH_ADDR=a,b` (hardware write watchpoints, logs every writer).
+Portable Linux package: `bash packaging/linux/build_appimage.sh` -> `dist/SotC-PC-x86_64.AppImage`
+(podman + Valve's Steam Runtime "sniper" SDK, glibc 2.31; GCC 14; `-DBB_PORTABLE=ON -DBB_AVPLAYER=OFF`:
+libstdc++ linked in, no FFmpeg; its own SDL3 with run-time backends; Python 3.9 bundled). The
+AppImage keeps its data in `SOTC_DATA_DIR` (default `~/.local/share/sotc-pc`). The cache of the
+SDK, libraries and build tree is `out/portable/`.
 
 Tests:
 - Python (scripts/): `python -m unittest discover -s tests` — single file/test:

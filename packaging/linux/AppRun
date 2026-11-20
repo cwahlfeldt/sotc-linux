@@ -1,0 +1,54 @@
+#!/bin/bash
+# Shadow of the Colossus PC, native Linux: the AppImage's entry point (packaging/linux).
+# The game is the player's own dump (CUSA08809 EU 1.01 or CUSA08034 US 1.00): SOTC_GAME_DIR (the
+# environment or sotc.ini), else such a folder next to the AppImage or in the data folder, else
+# a folder picker asks for it once and sotc.ini keeps the answer.
+# Data (the prepared image, saves, shader cache, sotc.ini, last_run.log): SOTC_DATA_DIR, default
+# ~/.local/share/sotc-pc. Settings: NAME=value lines in sotc.ini, as in README.md (sotc.py).
+HERE=$(dirname "$(readlink -f "$0")")
+export SOTC_DATA_DIR=${SOTC_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/sotc-pc}
+mkdir -p "$SOTC_DATA_DIR"
+ini=$SOTC_DATA_DIR/sotc.ini
+if [[ ! -f $ini ]]; then
+    printf '%s\n' '# Shadow of the Colossus PC settings: NAME=value lines (README.md lists them).' \
+        '# SOTC_FPS_CAP=off   (no 30 FPS cap; F7 switches in game)' \
+        '# SOTC_OVERLAY=1     (performance overlay; F10 switches in game)' > "$ini"
+fi
+# Started from a desktop or Steam, without a terminal: the session goes to last_run.log.
+if [[ ! -t 1 ]]; then exec >"$SOTC_DATA_DIR/last_run.log" 2>&1; fi
+
+message() {
+    echo "$1" >&2
+    if [[ ! -t 1 ]]; then
+        if command -v zenity >/dev/null; then zenity --error --title='Shadow of the Colossus' --text="$1"
+        elif command -v kdialog >/dev/null; then kdialog --title 'Shadow of the Colossus' --error "$1"; fi
+    fi
+}
+game_dir_set() { [[ -n ${SOTC_GAME_DIR:-} ]] || grep -q '^[[:space:]]*SOTC_GAME_DIR[[:space:]]*=' "$ini"; }
+if ! game_dir_set; then
+    for base in ${APPIMAGE:+"$(dirname "$APPIMAGE")"} "$SOTC_DATA_DIR"; do
+        for id in CUSA08809 CUSA08034; do
+            if [[ -f $base/$id/eboot.bin ]]; then export SOTC_GAME_DIR=$base/$id; break 2; fi
+        done
+    done
+fi
+if ! game_dir_set; then
+    title='Shadow of the Colossus: your game folder (CUSA08809 or CUSA08034, the one with eboot.bin)'
+    picked=
+    if command -v zenity >/dev/null; then
+        picked=$(zenity --file-selection --directory --title="$title" 2>/dev/null) || picked=
+    elif command -v kdialog >/dev/null; then
+        picked=$(kdialog --title "$title" --getexistingdirectory "$HOME" 2>/dev/null) || picked=
+    fi
+    if [[ -n $picked && -f $picked/eboot.bin ]]; then
+        printf 'SOTC_GAME_DIR=%s\n' "$picked" >> "$ini"
+    else
+        message "No game folder. Put CUSA08809 (or CUSA08034) next to the AppImage, or add SOTC_GAME_DIR=/path/to/it to $ini"
+        exit 1
+    fi
+fi
+
+# The bundled Python 3.9 (the launch scripts), never the system's.
+export PYTHONHOME=$HERE/usr PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1
+unset PYTHONPATH PYTHONSTARTUP
+exec "$HERE/usr/bin/python3" -s "$HERE/sotc.py" "$@"

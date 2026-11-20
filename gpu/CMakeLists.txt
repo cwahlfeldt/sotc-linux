@@ -178,8 +178,15 @@ set(COMMON
     shadps4/common/path_util.cpp shadps4/common/rdtsc.cpp shadps4/common/spin_lock.cpp shadps4/common/recursive_lock.cpp
     shadps4/common/string_util.cpp shadps4/common/thread.cpp shadps4/common/signal_context.cpp
     shim/common/logging/log.cpp)
-file(GLOB AVPLAYER CONFIGURE_DEPENDS shadps4/core/libraries/avplayer/*.cpp)
-pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET libavformat libavcodec libavutil libswscale libswresample)
+# sotc: BB_AVPLAYER=OFF leaves out the PS4 AvPlayer (video playback through FFmpeg). Shadow of the
+# Colossus never imports it; the portable Linux package (packaging/linux) builds without it.
+option(BB_AVPLAYER "PS4 AvPlayer through FFmpeg" ON)
+set(AVPLAYER)
+if (BB_AVPLAYER)
+    file(GLOB AVPLAYER CONFIGURE_DEPENDS shadps4/core/libraries/avplayer/*.cpp)
+    list(APPEND AVPLAYER shadps4/core/libraries/videodec/video_utils.cpp)
+    pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET libavformat libavcodec libavutil libswscale libswresample)
+endif()
 file(GLOB SHIM_SOURCES CONFIGURE_DEPENDS shim/*.cpp shim/*/*.cpp sotc/*.cpp)
 # Windows: a DLL cannot leave the runtime_* symbols for bb-probe.exe to resolve, so the
 # library is static there and linked into the executable.
@@ -191,8 +198,7 @@ endif()
 add_library(bbgpu ${BBGPU_KIND} ${VIDEO_CORE} ${RECOMPILER} ${COMMON} ${SHIM_SOURCES}
     shadps4/core/libraries/gnmdriver/gnmdriver.cpp
     shadps4/core/libraries/videoout/driver.cpp shadps4/core/libraries/videoout/video_out.cpp
-    shadps4/core/libraries/kernel/equeue.cpp ${AVPLAYER}
-    shadps4/core/libraries/videodec/video_utils.cpp)
+    shadps4/core/libraries/kernel/equeue.cpp ${AVPLAYER})
 add_dependencies(bbgpu host_shaders)
 # In-game settings menu: Dear ImGui (third_party/imgui, MIT) with its Vulkan backend, and an
 # embedded Cyrillic font (third_party/fonts).
@@ -294,7 +300,19 @@ if (NOT WIN32)
     target_link_options(bbgpu PRIVATE -Wl,--allow-shlib-undefined)
 endif()
 target_link_libraries(bbgpu PUBLIC Vulkan::Headers fmt::fmt Boost::headers magic_enum::magic_enum
-    tsl::robin_map GPUOpen::VulkanMemoryAllocator PkgConfig::XXHASH PkgConfig::SDL3 PkgConfig::FFMPEG miniz::miniz Zydis::Zydis sirit)
+    tsl::robin_map GPUOpen::VulkanMemoryAllocator PkgConfig::XXHASH PkgConfig::SDL3 miniz::miniz Zydis::Zydis sirit)
+if (BB_AVPLAYER)
+    target_link_libraries(bbgpu PUBLIC PkgConfig::FFMPEG)
+    target_compile_definitions(bbgpu PRIVATE BB_AVPLAYER)
+endif()
+# sotc: BB_PORTABLE (Linux, packaging/linux): libstdc++ and libgcc go into libbbgpu.so with their
+# symbols hidden, so the host's GPU driver (Mesa is C++ too) keeps its own, newer libstdc++; the
+# libraries shipped beside libbbgpu.so (SDL3) are found through $ORIGIN.
+option(BB_PORTABLE "Linux portable package build" OFF)
+if (BB_PORTABLE AND NOT WIN32)
+    target_link_options(bbgpu PRIVATE -static-libstdc++ -static-libgcc -Wl,--exclude-libs,ALL)
+    set_target_properties(bbgpu PROPERTIES BUILD_WITH_INSTALL_RPATH ON INSTALL_RPATH "\$ORIGIN")
+endif()
 if (WIN32)
     # Guest code is entered with the System V ABI; NOMINMAX/WIN32_LEAN_AND_MEAN keep
     # <windows.h> out of the way of std::min/max and the Vulkan/SDL headers.
