@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 """sotc: per-function self time (leaf samples) of a SOTC_PROFILE_OUT dump:
 profile_functions.py dump [exe] [top] [--inlines] [--qualified]
+exe: the module whose functions are listed (default out/gpu/libbbgpu.so, the dump's
+libbbgpu.so+0x... lines; out/bb-probe for the loader's).
 --inlines: an address counts for every function inlined at it (self time for the innermost one),
 so code inlined into big callers (LTO/PGO builds) shows under its own name.
 --qualified: Namespace::Class::function names instead of short ones (lambdas: operator() of ...)."""
 import collections, re, subprocess, sys
+from module_base import module_base
 flags = {a for a in sys.argv[1:] if a.startswith('--')}
 args = [a for a in sys.argv[1:] if not a.startswith('--')]
-exe = args[1] if len(args) > 1 else 'out/gpu/bb-probe.exe'
+exe = args[1] if len(args) > 1 else 'out/gpu/libbbgpu.so'
+module = exe.rsplit('/', 1)[-1] + '+'
+base = module_base(exe)
 top = int(args[2]) if len(args) > 2 else 45
 inlines = '--inlines' in flags
 qualified = '--qualified' in flags
@@ -17,8 +22,8 @@ for line in open(args[0], encoding='utf-8', errors='replace'):
     if parts[0] == 'samples':
         samples = int(parts[1]); continue
     rows.append((' '.join(parts[:-2]), int(parts[-2]), int(parts[-1])))
-own = [r for r in rows if r[0].startswith('bb-probe.exe+')]
-addrs = [hex(0x140000000 + int(r[0].split('+')[1], 16)) for r in own]
+own = [r for r in rows if r[0].startswith(module)]
+addrs = [hex(base + int(r[0].split('+')[1], 16)) for r in own]
 
 
 def short(name):
@@ -57,7 +62,7 @@ for (where, leaf, inc), chain in zip(own, chains):
         incl[name] += inc if depth > 0 else inc - leaf
 other = collections.Counter()
 for where, leaf, inc in rows:
-    if not where.startswith('bb-probe.exe+'):
+    if not where.startswith(module):
         other[re.sub(r'\+0x[0-9a-f]+$', '', where)] += leaf
 print(f'{samples} samples; self time by function:')
 for name, n in self_time.most_common(40):

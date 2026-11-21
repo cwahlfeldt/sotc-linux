@@ -66,10 +66,13 @@ read -r -a libraries <<< "$(pkg-config --libs vulkan sdl3)"
 # GPU library (shadPS4 video core + drivers), built by CMake into out/gpu/libbbgpu.so.
 # BB_CMAKE_ARGS: extra CMake arguments (packaging/linux: -DBB_PORTABLE=ON -DBB_AVPLAYER=OFF ...).
 # BB_PGO: generate (instrumented build that writes pgo/ while the game runs), use, off.
-# Default: use the profile in pgo/ when there is one. BB_LTO=OFF disables link-time optimization.
+# Default: use the profile in pgo/ when there is one for this compiler (Clang: pgo/bbgpu.profdata,
+# made by tools/pgo_train.sh; GCC: the .gcda files). BB_LTO=OFF disables link-time optimization.
 pgo=${BB_PGO:-}
 if [[ -z $pgo ]]; then
-    if [[ -n $(find pgo -name '*.gcda' -print -quit 2>/dev/null) ]]; then pgo=use; else pgo=off; fi
+    if [[ $("$CC" --version) == *clang* ]]; then
+        if [[ -f pgo/bbgpu.profdata ]]; then pgo=use; else pgo=off; fi
+    elif [[ -n $(find pgo -name '*.gcda' -print -quit 2>/dev/null) ]]; then pgo=use; else pgo=off; fi
 fi
 mkdir -p pgo
 # Submodules (git clone --recursive, or: git submodule update --init) and this port's changes

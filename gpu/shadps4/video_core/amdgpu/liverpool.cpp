@@ -39,6 +39,7 @@
 #include "video_core/sotc_lod_stats.h"
 #include "video_core/sotc_opstats.h"
 #include "video_core/sotc_stats.h"
+#include "bbport_threads.h" // sotc: PreferPerformanceCores
 #include "bbport_toggles.h"
 
 // sotc: writes guest memory through the backing view (runtime_memory.c).
@@ -209,6 +210,7 @@ void Liverpool::ServeFinishes(bool at_safepoint) {
 
 void Liverpool::BackLoop(std::stop_token stoken) {
     Common::SetCurrentThreadName("shadPS4:GpuDraw");
+    BbThreads::PreferPerformanceCores(); // sotc: Linux, hybrid CPUs (bbport_threads.h)
     // sotc: MicroCostSweep, see Liverpool::OnBackThread.
     t_on_back_thread = true;
     Shader::g_info_slot = 1;
@@ -970,6 +972,7 @@ void Liverpool::ProcessCommands() {
 
 void Liverpool::Process(std::stop_token stoken) {
     Common::SetCurrentThreadName("shadPS4:GpuCommandProcessor");
+    BbThreads::PreferPerformanceCores(); // sotc: Linux, hybrid CPUs (bbport_threads.h)
     gpu_id = std::this_thread::get_id();
     SotcStats::RegisterSplitThread(SotcStats::SplitThreadCp);
 #ifdef __linux__

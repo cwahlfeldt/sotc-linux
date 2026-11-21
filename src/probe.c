@@ -2191,6 +2191,317 @@ static void *hang_watchdog(void *unused) {
     }
     return NULL;
 }
+/* sotc (Linux): SOTC_PROFILE=<thread name part>, the Windows profiler's report (see profiler
+ * there). Linux keeps the first 15 characters of a thread name (shadPS4:GpuComm). The thread's
+ * own CPU clock (SOTC_PROFILE_CLOCK=wall: CLOCK_MONOTONIC, waits included) sends it SIGPROF every
+ * SOTC_PROFILE_US (default 1000) us from SOTC_PROFILE_DELAY (default 20) s for
+ * SOTC_PROFILE_SECONDS (default 15) s; SOTC_PROFILE_START=<file>: after the delay, also until
+ * that file exists (a scripted run starts the window when its measurement starts). The handler,
+ * on that thread, keeps the interrupted rip, the word at rsp (the return address while a
+ * frameless leaf such as memcpy has pushed nothing) and the rbp chain, read only inside the
+ * thread's stack mapping (found from the first samples' rsp), so a frame that is not one cannot
+ * fault. Not process_vm_readv: it takes the mmap lock, which the GPU page tracking's mprotect
+ * calls hold for writing, and the profiled game lost ~40% of its frame rate. Addresses are module offsets
+ * (libbbgpu.so+0x...); SOTC_PROFILE_OUT=<file> gets every one for tools/profile_functions.py
+ * <file> out/gpu/libbbgpu.so. Callers beyond the first are exact only in a build with frame
+ * pointers (BB_CMAKE_ARGS=-DCMAKE_CXX_FLAGS=-fno-omit-frame-pointer). */
+static void describe_address(char *out, size_t size, uintptr_t address) {
+    Dl_info info;
+    if (image && address-(uintptr_t)image<0x20000000) { snprintf(out,size,"guest offset 0x%" PRIxPTR,address-(uintptr_t)image); return; }
+    if (dladdr((void *)address,&info) && info.dli_fname && info.dli_fbase) {
+        const char *base=strrchr(info.dli_fname,'/');
+        snprintf(out,size,"%s+0x%" PRIxPTR,base ? base+1 : info.dli_fname,address-(uintptr_t)info.dli_fbase);
+        return;
+    }
+    snprintf(out,size,"%p",(void *)address);
+}
+#define LPROF_DEPTH 30
+typedef struct { uintptr_t rip, at_rsp; unsigned depth; int cpu; uintptr_t frames[LPROF_DEPTH]; } LinuxSample;
+static LinuxSample *lprof_samples;
+static size_t lprof_capacity, lprof_count;
+static pid_t lprof_tid;
+static uintptr_t lprof_stack_lo, lprof_stack_hi, lprof_last_rsp; /* the stack: 0 until known */
+static void lprof_signal(int sig, siginfo_t *info, void *context) {
+    (void)sig; (void)info;
+    if (gettid()!=lprof_tid) return;
+    const size_t n=__atomic_fetch_add(&lprof_count,1,__ATOMIC_RELAXED);
+    if (n<lprof_capacity) {
+        const ucontext_t *uc=context;
+        LinuxSample *s=&lprof_samples[n];
+        const uintptr_t rsp=(uintptr_t)uc->uc_mcontext.gregs[REG_RSP];
+        const uintptr_t lo=__atomic_load_n(&lprof_stack_lo,__ATOMIC_ACQUIRE), hi=lprof_stack_hi;
+        uintptr_t rbp=(uintptr_t)uc->uc_mcontext.gregs[REG_RBP];
+        s->rip=(uintptr_t)uc->uc_mcontext.gregs[REG_RIP];
+        s->depth=0;
+        s->cpu=sched_getcpu(); /* rseq / vDSO: no lock */
+        /* The kernel has just written this signal's frame below rsp: [rsp] is readable. */
+        s->at_rsp=*(const uintptr_t *)rsp;
+        __atomic_store_n(&lprof_last_rsp,rsp,__ATOMIC_RELAXED);
+        /* Frames lie above rsp in the same stack: anything else in rbp is not a frame pointer. */
+        if (!lo || rsp<lo || rsp>=hi) return;
+        while (s->depth<LPROF_DEPTH && rbp>=rsp && rbp<=hi-16 && !(rbp & 7)) {
+            const uintptr_t *frame=(const uintptr_t *)rbp;
+            if (!frame[1]) break;
+            s->frames[s->depth++]=frame[1];
+            if (frame[0]<=rbp) break;
+            rbp=frame[0];
+        }
+    }
+}
+/* The readable mapping of /proc/self/maps that holds address (the profiled thread's stack). */
+static int mapping_of(uintptr_t address, uintptr_t *lo, uintptr_t *hi) {
+    FILE *maps=fopen("/proc/self/maps","r");
+    char line[512];
+    int found=0;
+    while (maps && !found && fgets(line,sizeof(line),maps)) {
+        unsigned long a, b; char perms[8];
+        if (sscanf(line,"%lx-%lx %7s",&a,&b,perms)==3 && address>=a && address<b && perms[0]=='r') {
+            *lo=a; *hi=b; found=1;
+        }
+    }
+    if (maps) fclose(maps);
+    return found;
+}
+static void profile_wait_start(void) {
+    const char *start=getenv("SOTC_PROFILE_START");
+    while (start && *start && access(start,F_OK)) usleep(50000);
+}
+#define LPROF_SLOTS (1u<<18)
+typedef struct { uintptr_t address; unsigned leaf, inclusive; } LinuxSlot;
+typedef struct { uintptr_t leaf, caller; unsigned count; } LinuxPair;
+static LinuxSlot *lprof_slots;
+static LinuxPair lprof_pairs[4096];
+static void lprof_add(uintptr_t address, int leaf) {
+    size_t i=(address*0x9E3779B97F4A7C15ull)>>46;
+    for (size_t n=0;n<LPROF_SLOTS;++n,i=(i+1)&(LPROF_SLOTS-1)) {
+        LinuxSlot *s=&lprof_slots[i];
+        if (!s->address) s->address=address;
+        if (s->address==address) { if (leaf) ++s->leaf; ++s->inclusive; return; }
+    }
+}
+static void lprof_pair(uintptr_t leaf, uintptr_t caller) {
+    for (int i=0;i<4096;++i) {
+        LinuxPair *p=&lprof_pairs[i];
+        if (!p->count) { p->leaf=leaf; p->caller=caller; }
+        if (p->leaf==leaf && p->caller==caller) { ++p->count; return; }
+    }
+}
+static int lprof_by_leaf(const void *a, const void *b) {
+    const unsigned x=((const LinuxSlot *)a)->leaf, y=((const LinuxSlot *)b)->leaf;
+    return (x<y)-(x>y);
+}
+static int lprof_by_inclusive(const void *a, const void *b) {
+    const unsigned x=((const LinuxSlot *)a)->inclusive, y=((const LinuxSlot *)b)->inclusive;
+    return (x<y)-(x>y);
+}
+static int lprof_by_pair(const void *a, const void *b) {
+    const unsigned x=((const LinuxPair *)a)->count, y=((const LinuxPair *)b)->count;
+    return (x<y)-(x>y);
+}
+/* The loader's and the GPU library's code: "own" frames, the callers a system leaf is charged to. */
+static uintptr_t own_lo[2], own_hi[2];
+static int own_code(uintptr_t a) { return (a>=own_lo[0] && a<own_hi[0]) || (a>=own_lo[1] && a<own_hi[1]); }
+static void own_range(void *symbol, int slot) {
+    Dl_info info;
+    FILE *maps=fopen("/proc/self/maps","r");
+    char line[512], path[400]="";
+    if (!dladdr(symbol,&info) || !info.dli_fname || !maps) { if (maps) fclose(maps); return; }
+    /* every executable mapping of the file that holds symbol */
+    const char *want=strrchr(info.dli_fname,'/');
+    want=want ? want+1 : info.dli_fname;
+    while (fgets(line,sizeof(line),maps)) {
+        unsigned long lo, hi; char perms[8];
+        path[0]=0;
+        if (sscanf(line,"%lx-%lx %7s %*s %*s %*s %399s",&lo,&hi,perms,path)<3 || perms[2]!='x') continue;
+        const char *base=strrchr(path,'/');
+        if (!path[0] || strcmp(base ? base+1 : path,want)) continue;
+        if (!own_lo[slot] || lo<own_lo[slot]) own_lo[slot]=lo;
+        if (hi>own_hi[slot]) own_hi[slot]=hi;
+    }
+    fclose(maps);
+}
+static pid_t thread_named(const char *part, char *name, size_t size) {
+    DIR *dir=opendir("/proc/self/task");
+    pid_t found=0;
+    for (struct dirent *e; dir && !found && (e=readdir(dir));) {
+        const pid_t tid=(pid_t)atoi(e->d_name);
+        char path[64], comm[64]="";
+        if (tid<=0) continue;
+        snprintf(path,sizeof(path),"/proc/self/task/%d/comm",(int)tid);
+        FILE *f=fopen(path,"r");
+        if (!f) continue;
+        if (fgets(comm,sizeof(comm),f)) comm[strcspn(comm,"\n")]=0;
+        fclose(f);
+        if (strstr(comm,part)) { found=tid; snprintf(name,size,"%s",comm); }
+    }
+    if (dir) closedir(dir);
+    return found;
+}
+static clockid_t thread_cpu_clock(pid_t tid) { return (clockid_t)((~(unsigned)tid<<3)|6); } /* CPUCLOCK_SCHED, per thread */
+static double clock_seconds(clockid_t clock) {
+    struct timespec t;
+    return clock_gettime(clock,&t) ? 0.0 : (double)t.tv_sec+(double)t.tv_nsec/1e9;
+}
+static void *linux_profiler(void *arg) {
+    const char *part=arg, *delay=getenv("SOTC_PROFILE_DELAY"), *seconds=getenv("SOTC_PROFILE_SECONDS");
+    const char *us_text=getenv("SOTC_PROFILE_US"), *clock_text=getenv("SOTC_PROFILE_CLOCK");
+    const int window=seconds ? atoi(seconds) : 15;
+    long us=us_text ? atol(us_text) : 1000;
+    if (us<50) us=50;
+    sleep((unsigned)(delay ? atoi(delay) : 20));
+    profile_wait_start();
+    char name[64]="";
+    const pid_t tid=thread_named(part,name,sizeof(name));
+    if (!tid) { fprintf(stderr,"SOTC profile: no thread named like %s\n",part); return NULL; }
+    lprof_capacity=(size_t)((double)window*1e6/(double)us)+4096;
+    lprof_samples=calloc(lprof_capacity,sizeof(*lprof_samples));
+    lprof_slots=calloc(LPROF_SLOTS,sizeof(*lprof_slots));
+    if (!lprof_samples || !lprof_slots) return NULL;
+    lprof_tid=tid;
+    own_range((void *)linux_profiler,0);
+    own_range((void *)bbgpu_flip_count,1);
+    struct sigaction sa={0};
+    sa.sa_sigaction=lprof_signal; sa.sa_flags=SA_SIGINFO|SA_RESTART;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGPROF,&sa,NULL);
+    const int wall=clock_text && !strcmp(clock_text,"wall");
+    const clockid_t cpu=thread_cpu_clock(tid);
+    /* Raw syscalls: glibc before 2.34 keeps timer_create in librt, which is not linked. */
+    struct sigevent event;
+    memset(&event,0,sizeof(event));
+    event.sigev_notify=SIGEV_THREAD_ID; event.sigev_signo=SIGPROF; event._sigev_un._tid=tid;
+    int timer=-1;
+    if (syscall(SYS_timer_create,wall ? CLOCK_MONOTONIC : cpu,&event,&timer)) {
+        fprintf(stderr,"SOTC profile: timer_create failed (%s)\n",strerror(errno)); return NULL;
+    }
+    const struct itimerspec period={{us/1000000,(us%1000000)*1000},{us/1000000,(us%1000000)*1000}};
+    const double cpu0=clock_seconds(cpu), wall0=clock_seconds(CLOCK_MONOTONIC);
+    const uint64_t flips0=bbgpu_flip_count();
+    syscall(SYS_timer_settime,timer,0,&period,NULL);
+    /* The stack mapping, from an rsp the handler saw (until then only leaves are kept). */
+    for (int tries=0; tries<200 && !lprof_stack_lo; ++tries) {
+        uintptr_t lo, hi;
+        const uintptr_t rsp=__atomic_load_n(&lprof_last_rsp,__ATOMIC_RELAXED);
+        if (rsp && mapping_of(rsp,&lo,&hi) && hi-lo>=(64u<<10)) {
+            lprof_stack_hi=hi;
+            __atomic_store_n(&lprof_stack_lo,lo,__ATOMIC_RELEASE);
+            fprintf(stderr,"SOTC profile: stack of %s at [%#lx,%#lx)\n",name,(unsigned long)lo,(unsigned long)hi);
+        } else usleep(20000);
+    }
+    sleep((unsigned)window);
+    syscall(SYS_timer_delete,timer);
+    const double busy=clock_seconds(cpu)-cpu0, elapsed=clock_seconds(CLOCK_MONOTONIC)-wall0;
+    const uint64_t frames=bbgpu_flip_count()-flips0;
+    usleep(100000); /* a handler under way finishes */
+    size_t n=__atomic_load_n(&lprof_count,__ATOMIC_RELAXED);
+    if (n>lprof_capacity) n=lprof_capacity;
+    unsigned samples=0, on_cpu[256]={0};
+    for (size_t i=0;i<n;++i) {
+        const LinuxSample *s=&lprof_samples[i];
+        if (!s->rip) continue;
+        ++samples;
+        if (s->cpu>=0 && s->cpu<256) ++on_cpu[s->cpu];
+        lprof_add(s->rip,1);
+        for (unsigned d=0;d<s->depth;++d) lprof_add(s->frames[d],0);
+        if (!own_code(s->rip)) { /* who called into the system library or generated code */
+            uintptr_t caller=own_code(s->at_rsp) ? s->at_rsp : 0;
+            for (unsigned d=0;!caller && d<s->depth;++d) if (own_code(s->frames[d])) caller=s->frames[d];
+            lprof_pair(s->rip,caller);
+        }
+    }
+    char where[512], caller[512];
+    fprintf(stderr,"SOTC profile of %s (tid %d): %u samples, %.1f s on the CPU of %.1f s (%.0f%%), %llu flips, %.2f ms CPU/flip\n",
+            name,(int)tid,samples,busy,elapsed,elapsed>0 ? 100.0*busy/elapsed : 0.0,(unsigned long long)frames,
+            frames ? 1000.0*busy/(double)frames : 0.0);
+    if (!samples) return NULL;
+    /* Hybrid CPUs (Intel P/E cores): where the thread ran. */
+    fprintf(stderr,"  samples by CPU:");
+    for (int c=0;c<256;++c) if (on_cpu[c]) fprintf(stderr," %d:%.1f%%",c,100.0*on_cpu[c]/samples);
+    fprintf(stderr,"\n");
+    if (getenv("SOTC_PROFILE_OUT")) {
+        FILE *out=fopen(getenv("SOTC_PROFILE_OUT"),"w");
+        for (size_t i=0; out && i<LPROF_SLOTS; ++i) {
+            if (!lprof_slots[i].address) continue;
+            describe_address(where,sizeof(where),lprof_slots[i].address);
+            fprintf(out,"%s %u %u\n",where,lprof_slots[i].leaf,lprof_slots[i].inclusive);
+        }
+        if (out) { fprintf(out,"samples %u\n",samples); fclose(out); }
+    }
+    qsort(lprof_slots,LPROF_SLOTS,sizeof(*lprof_slots),lprof_by_leaf);
+    fprintf(stderr,"  leaf:\n");
+    for (int i=0;i<40 && lprof_slots[i].leaf;++i) {
+        describe_address(where,sizeof(where),lprof_slots[i].address);
+        fprintf(stderr,"  %5.1f%% %s\n",100.0*lprof_slots[i].leaf/samples,where);
+    }
+    qsort(lprof_pairs,4096,sizeof(*lprof_pairs),lprof_by_pair);
+    fprintf(stderr,"  system leaf <- first own caller:\n");
+    for (int i=0;i<30 && lprof_pairs[i].count;++i) {
+        describe_address(where,sizeof(where),lprof_pairs[i].leaf);
+        if (lprof_pairs[i].caller) describe_address(caller,sizeof(caller),lprof_pairs[i].caller);
+        else snprintf(caller,sizeof(caller),"?");
+        fprintf(stderr,"  %5.1f%% %s <- %s\n",100.0*lprof_pairs[i].count/samples,where,caller);
+    }
+    qsort(lprof_slots,LPROF_SLOTS,sizeof(*lprof_slots),lprof_by_inclusive);
+    fprintf(stderr,"  inclusive:\n");
+    for (int i=0;i<60 && lprof_slots[i].inclusive;++i) {
+        describe_address(where,sizeof(where),lprof_slots[i].address);
+        fprintf(stderr,"  %5.1f%% %s\n",100.0*lprof_slots[i].inclusive/samples,where);
+    }
+    fflush(stderr);
+    return NULL;
+}
+/* sotc (Linux): SOTC_THREAD_TIMES=1, as on Windows: each thread's CPU time over the profile
+ * window (SOTC_PROFILE_DELAY to +SOTC_PROFILE_SECONDS) and per flip. */
+typedef struct { pid_t tid; double cpu; char name[32]; } LinuxThreadTime;
+static int linux_thread_snapshot(LinuxThreadTime *rows, int max) {
+    DIR *dir=opendir("/proc/self/task");
+    int count=0;
+    for (struct dirent *e; dir && count<max && (e=readdir(dir));) {
+        const pid_t tid=(pid_t)atoi(e->d_name);
+        if (tid<=0) continue;
+        LinuxThreadTime *r=&rows[count];
+        char path[64];
+        r->tid=tid; r->name[0]=0;
+        r->cpu=clock_seconds(thread_cpu_clock(tid));
+        snprintf(path,sizeof(path),"/proc/self/task/%d/comm",(int)tid);
+        FILE *f=fopen(path,"r");
+        if (f) { if (fgets(r->name,sizeof(r->name),f)) r->name[strcspn(r->name,"\n")]=0; fclose(f); }
+        ++count;
+    }
+    if (dir) closedir(dir);
+    return count;
+}
+static int linux_thread_by_cpu(const void *a, const void *b) {
+    const double x=((const LinuxThreadTime *)a)->cpu, y=((const LinuxThreadTime *)b)->cpu;
+    return (x<y)-(x>y);
+}
+static void *linux_thread_times(void *unused) {
+    (void)unused;
+    const char *delay=getenv("SOTC_PROFILE_DELAY"), *seconds=getenv("SOTC_PROFILE_SECONDS");
+    static LinuxThreadTime before[512], after[512];
+    sleep((unsigned)(delay ? atoi(delay) : 20));
+    profile_wait_start();
+    const uint64_t flips0=bbgpu_flip_count();
+    const double t0=clock_seconds(CLOCK_MONOTONIC);
+    const int nb=linux_thread_snapshot(before,512);
+    sleep((unsigned)(seconds ? atoi(seconds) : 15));
+    const int na=linux_thread_snapshot(after,512);
+    const double elapsed=clock_seconds(CLOCK_MONOTONIC)-t0;
+    const uint64_t frames=bbgpu_flip_count()-flips0;
+    for (int i=0;i<na;++i) {
+        double start=0;
+        for (int j=0;j<nb;++j) if (before[j].tid==after[i].tid) { start=before[j].cpu; break; }
+        after[i].cpu-=start;
+    }
+    qsort(after,(size_t)na,sizeof(*after),linux_thread_by_cpu);
+    fprintf(stderr,"SOTC thread times: %.1f s, %llu flips (%.1f FPS)\n",elapsed,(unsigned long long)frames,
+            elapsed>0 ? (double)frames/elapsed : 0.0);
+    for (int i=0;i<na && after[i].cpu>=0.01;++i)
+        fprintf(stderr,"  tid %7d %-16s %8.2f s %5.1f%%  %7.3f ms/flip\n",(int)after[i].tid,after[i].name[0] ? after[i].name : "?",
+                after[i].cpu,elapsed>0 ? 100.0*after[i].cpu/elapsed : 0.0,frames ? 1000.0*after[i].cpu/(double)frames : 0.0);
+    fflush(stderr);
+    return NULL;
+}
 static void start_thread(void *(*fn)(void *), void *arg) {
     pthread_t thread;
     if (!pthread_create(&thread,NULL,fn,arg)) pthread_detach(thread);
@@ -2650,6 +2961,8 @@ int main(int argc, char **argv) {
     }
 #else
     if (gpu_enabled && !(getenv("SOTC_WATCHDOG") && getenv("SOTC_WATCHDOG")[0]=='0')) start_thread(hang_watchdog,NULL);
+    if (getenv("SOTC_PROFILE")) start_thread(linux_profiler,(void *)getenv("SOTC_PROFILE"));
+    if (getenv("SOTC_THREAD_TIMES")) start_thread(linux_thread_times,NULL);
     /* Linux: only for a game on a hard disk (SOTC_PREFETCH=1: always). Reading 13 GB ahead fills
      * the page cache, and memory pressure monitors (systemd-oomd) may then end the session. */
     if (app0 && (getenv("SOTC_PREFETCH") ? getenv("SOTC_PREFETCH")[0]=='1' : game_disk_rotational==1)) {

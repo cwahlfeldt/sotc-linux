@@ -20,6 +20,7 @@
 #include "common/thread.h"
 #include "video_core/renderer_vulkan/vk_recorder.h"
 #include "video_core/sotc_stats.h"
+#include "bbport_threads.h" // sotc: PreferPerformanceCores
 
 #if defined(_M_X64) || defined(__x86_64__)
 #include <immintrin.h>
@@ -860,6 +861,7 @@ void CommandRecorder::Sync() {
 
 void CommandRecorder::ConsumerLoop(std::stop_token stoken) {
     Common::SetCurrentThreadName("shadPS4:GpuRecorder");
+    BbThreads::PreferPerformanceCores(); // sotc: Linux, hybrid CPUs (bbport_threads.h)
     SotcStats::RegisterSplitThread(SotcStats::SplitThreadRecorder);
     Common::SetCurrentThreadPriority(Common::ThreadPriority::High);
     using Clock = std::chrono::steady_clock;
