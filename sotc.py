@@ -15,9 +15,10 @@ Settings (environment variables, or sotc.ini beside this script as NAME=value li
     SOTC_DATA_DIR     the folder of out/, user/ and sotc.ini when the port's is read-only (AppImage)
     SOTC_UPDATE_DIR   optional: the game update; by default <game>-UPDATE or <game>-patch next to
                       the dump (as shadPS4); its files take the place of the base game's
-    SOTC_DLC_DIR      optional: the game's DLC (one folder per add-on with sce_sys/param.sfo,
-                      or shadPS4's addcont folder holding CUSA08809 / CUSA08034); only DLC of the
-                      game's own region is listed
+    SOTC_DLC_DIR      optional: the game's DLC (one folder per add-on with sce_sys/param.sfo, the
+                      add-ons' .pkg files, or shadPS4's addcont folder holding CUSA08809 /
+                      CUSA08034); by default <game>-DLC next to the dump; only DLC of the game's
+                      own region is listed
     SOTC_MODES        optional, comma-separated: af16 (16x anisotropic filtering),
                       fps60 (removes the 30 FPS cap; experimental, vblank at 120 Hz),
                       fps60game (the game's own 60 FPS target, as the PS4 Pro Performance mode;
@@ -219,6 +220,10 @@ def main():
 
     # A complete update (shadPS4's <game>-UPDATE): the image comes from its eboot, and its files
     # take the place of the base game's while the game runs (src/runtime_file.c).
+    # The DLC next to the dump (<game>-DLC), as the update (<game>-UPDATE), unless SOTC_DLC_DIR.
+    dlc = game.with_name(game.name + '-DLC')
+    if not env.get('SOTC_DLC_DIR') and dlc.is_dir():
+        env['SOTC_DLC_DIR'] = str(dlc)
     update = game_update(game)
     for folder in (game, update):
         if folder and (folder / 'eboot.bin').is_file() and (folder / 'eboot.bin').stat().st_size == 0:

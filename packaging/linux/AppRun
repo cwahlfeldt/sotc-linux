@@ -1,12 +1,25 @@
 #!/bin/bash
 # Shadow of the Colossus PC, native Linux: the AppImage's entry point (packaging/linux).
-# The game is the player's own dump (CUSA08809 EU 1.01 or CUSA08034 US 1.00): SOTC_GAME_DIR (the
-# environment or sotc.ini), else such a folder next to the AppImage or in the data folder, else
-# a folder picker asks for it once and sotc.ini keeps the answer.
-# Data (the prepared image, saves, shader cache, sotc.ini, last_run.log): SOTC_DATA_DIR, default
+# Meant to sit in one folder that can be copied to another PC as it is:
+#   SotC-PC-x86_64.AppImage
+#   CUSA08809/  (or CUSA08034/)   the player's own dump: eboot.bin, sce_module, sce_sys...
+#   CUSA08809-UPDATE/             optional: the 1.01 update
+#   CUSA08809-DLC/                optional: the add-ons (.pkg files or folders)
+#   data/                         made here: settings (sotc.ini), saves, shader cache, logs
+# The game: SOTC_GAME_DIR (environment), else that folder next to the AppImage, else
+# SOTC_GAME_DIR in sotc.ini, else a folder picker asks once and sotc.ini keeps the answer.
+# Data: SOTC_DATA_DIR, else data/ next to the AppImage, else (that folder read-only)
 # ~/.local/share/sotc-pc. Settings: NAME=value lines in sotc.ini, as in README.md (sotc.py).
 HERE=$(dirname "$(readlink -f "$0")")
-export SOTC_DATA_DIR=${SOTC_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/sotc-pc}
+BESIDE=${APPIMAGE:+$(dirname "$(readlink -f "$APPIMAGE")")}
+if [[ -z ${SOTC_DATA_DIR:-} ]]; then
+    if [[ -n $BESIDE ]] && mkdir -p "$BESIDE/data" 2>/dev/null && [[ -w $BESIDE/data ]]; then
+        SOTC_DATA_DIR=$BESIDE/data
+    else
+        SOTC_DATA_DIR=${XDG_DATA_HOME:-$HOME/.local/share}/sotc-pc
+    fi
+fi
+export SOTC_DATA_DIR
 mkdir -p "$SOTC_DATA_DIR"
 ini=$SOTC_DATA_DIR/sotc.ini
 if [[ ! -f $ini ]]; then
@@ -24,15 +37,15 @@ message() {
         elif command -v kdialog >/dev/null; then kdialog --title 'Shadow of the Colossus' --error "$1"; fi
     fi
 }
-game_dir_set() { [[ -n ${SOTC_GAME_DIR:-} ]] || grep -q '^[[:space:]]*SOTC_GAME_DIR[[:space:]]*=' "$ini"; }
-if ! game_dir_set; then
-    for base in ${APPIMAGE:+"$(dirname "$APPIMAGE")"} "$SOTC_DATA_DIR"; do
+# A dump next to the AppImage wins over a path in sotc.ini: the folder may have moved to another PC.
+if [[ -z ${SOTC_GAME_DIR:-} ]]; then
+    for base in ${BESIDE:+"$BESIDE"} "$SOTC_DATA_DIR"; do
         for id in CUSA08809 CUSA08034; do
             if [[ -f $base/$id/eboot.bin ]]; then export SOTC_GAME_DIR=$base/$id; break 2; fi
         done
     done
 fi
-if ! game_dir_set; then
+if [[ -z ${SOTC_GAME_DIR:-} ]] && ! grep -q '^[[:space:]]*SOTC_GAME_DIR[[:space:]]*=' "$ini"; then
     title='Shadow of the Colossus: your game folder (CUSA08809 or CUSA08034, the one with eboot.bin)'
     picked=
     if command -v zenity >/dev/null; then

@@ -7,6 +7,7 @@
 #include <cstring>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace BbSettings {
 
@@ -187,12 +188,58 @@ bool ResolutionNeedsRestart() {
          (v.upscaler == UpscalerTaa) != (v.startup_upscaler == UpscalerTaa));
 }
 
+// The keys Save writes; every other line of the file is the player's (sotc.py's SOTC_* settings,
+// key./pad. remaps, comments) and stays.
+static bool OwnedKey(std::string_view key) {
+    static constexpr std::string_view owned[] = {
+        "upscaler", "preset", "sharpen", "sharpness", "jitter", "reactive", "object_motion",
+        "reactive_scale", "reactive_threshold", "reactive_max", "debug_view", "show_fps",
+        "fsr4_auto_exposure", "fsr4_invert_jitter", "model_lod", "output_res", "mouse",
+        "mouse_sens", "mouse_invert", "fullscreen", "live_resolution"};
+    for (const auto k : owned) {
+        if (key == k) {
+            return true;
+        }
+    }
+    for (int e = 0; e < EffectCount; ++e) {
+        if (key == Effects[e].key) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void Save() {
     const auto& v = Get();
+    static constexpr const char* Header = "# bbport settings (in-game menu: Insert / L3+R3)";
+    // sotc: the menu rewrote the whole file and dropped the player's own lines (SOTC_FPS_CAP,
+    // the controls' remaps...): those are kept, the menu's keys follow them.
+    std::vector<std::string> kept;
+    if (FILE* in = std::fopen(Path(), "r")) {
+        char buffer[2048];
+        while (std::fgets(buffer, sizeof(buffer), in)) {
+            std::string line{buffer};
+            while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) {
+                line.pop_back();
+            }
+            const size_t eq = line.find('=');
+            std::string key = eq == std::string::npos ? std::string{} : line.substr(0, eq);
+            key.erase(0, key.find_first_not_of(" \t"));
+            key.erase(key.find_last_not_of(" \t") + 1);
+            if (line == Header || (!key.empty() && key[0] != '#' && OwnedKey(key))) {
+                continue;
+            }
+            kept.push_back(std::move(line));
+        }
+        std::fclose(in);
+    }
     FILE* file = std::fopen(Path(), "w");
     if (!file) {
         std::printf("Settings: cannot write %s\n", Path());
         return;
+    }
+    for (const auto& line : kept) {
+        std::fprintf(file, "%s\n", line.c_str());
     }
     std::fprintf(file,
                  "# bbport settings (in-game menu: Insert / L3+R3)\n"
