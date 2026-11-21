@@ -120,7 +120,7 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
     if (const char* version = std::getenv("SOTC_GAME_VERSION"); version && *version) {
         title_suffix = std::string(" · v") + version;
     }
-    // sotc: the port's version (SOTC_PORT_VERSION, from the launcher).
+    // sotc: the port's version (SOTC_PORT_VERSION: sotc.py reads it from VERSION).
     if (const char* port = std::getenv("SOTC_PORT_VERSION"); port && *port) {
         title_suffix += std::string(" · Port v") + port;
     }

@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
-"""Launcher texts in Spanish, Chinese (Simplified), Korean and Russian, looked up by the
-Portuguese text (sotc_launcher_win._); a missing entry falls back to English. Regenerate the
-key list with tools/launcher_i18n_extract.py after changing texts."""
+"""Texts in Spanish, Chinese (Simplified), Korean and Russian, looked up by the Portuguese text; a
+missing entry falls back to English. tools/menu_texts.py and tools/gen_menu_text.py take the
+in-game menu's from here into gpu/shim/bbport_menu_text.inc. The table began as the Windows
+launcher's (removed), so it also holds that launcher's texts."""
 
 TRANSLATIONS = {
     'es': {

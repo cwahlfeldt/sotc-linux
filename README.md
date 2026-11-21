@@ -1,8 +1,6 @@
-# Shadow of the Colossus — PC native port · v0.76.2
+# Shadow of the Colossus — native Linux port · v0.76.2
 
-<a href="https://recomplauncher.com/game/shadowofthecolossus-pc"><picture><source media="(prefers-color-scheme: dark)" srcset="https://recomplauncher.com/assets/press/launcher/badge-light.svg"><img alt="Get it on RecompLauncher" src="https://recomplauncher.com/assets/press/launcher/badge-dark.svg" height="48"></picture></a>
-
-[Releases](../../releases) · [Changelog](CHANGELOG.md)
+[Changelog](CHANGELOG.md)
 
 > [!CAUTION]
 > *⚠️*No game or Sony files are included.** You need your own game dump. Since v0.75 the sound
@@ -12,17 +10,19 @@
 > [!CAUTION]
 > ⚠️ **Install the game on an SSD, NVMe if you can.** Every new area streams hundreds of MB of
 > textures and models from the game folder; on a hard disk the area changes stutter far more and
-> can freeze for seconds. Put the game dump (and, ideally, the port's folder) on an SSD.
+> can freeze for seconds. Put the game dump (and, ideally, this folder) on an SSD.
 
 ---
 
 **Status: the game can be finished from start to end** (v0.60.3: played through the last
 colossus, the ending and the credits, with high quality textures, PS4 Pro mode and 60 FPS on).
 
-A native Windows port of the PS4 **Shadow of the Colossus** (Bluepoint, 2018; CUSA08809 EU 1.01 or
-CUSA08034 US 1.00) for **Windows 10/11**. The game's own x86-64 code runs directly on the PC's CPU and the PS4 GPU
-is translated to Vulkan. It is not a full emulator: it is a loader with the system functions the
-game needs, in the style of [bloodborne_pc](https://github.com/Supermedo/bloodborne_pc).
+A native **Linux** port of the PS4 **Shadow of the Colossus** (Bluepoint, 2018; CUSA08809 EU 1.01
+or CUSA08034 US 1.00). The game's own x86-64 code runs directly on the PC's CPU and the PS4 GPU is
+translated to Vulkan. It is not a full emulator: it is a loader with the system functions the game
+needs, in the style of [bloodborne_pc](https://github.com/Supermedo/bloodborne_pc). You build it
+from these sources (see [Build and play](#build-and-play)); there is no Windows version (the
+project began as one: releases up to 0.76.2 in the table below were Windows packages).
 
 ### What's new
 
@@ -87,13 +87,15 @@ the menu is open; **Esc** or F1 closes it.
 ![In-game menu (F1)](docs/images/sotc-menu-f1-en.png)
 
 - **Quick settings (apply at once):** FPS (30 / 60 / unlimited), upscaler (FSR 1 / bilinear),
-  sharpening (RCAS), frame generation, **texture quality**, far shadow reuse, volume. They are
-  also saved as the launcher's choice for the next start.
+  sharpening (RCAS), frame generation, **texture quality**, far shadow reuse, volume.
 - **Display:** fullscreen, FPS counter.
 - **Camera & mouse:** mouse camera on/off, sensitivity, invert Y.
-- The header shows FPS, frame time, the GPU and its video memory in use. Output resolution,
-  effects (fog, vignette, SSAO), 16x AF, PS4 Pro mode and video memory use stay in the launcher
-  (they apply when the game starts).
+- The header shows FPS, frame time, the GPU and its video memory in use.
+- **What is kept for the next start:** only the GPU library's own settings, which the menu writes
+  at the end of `sotc.ini`. Keeping the rest (FPS mode, texture quality, frame generation, volume,
+  and the ◆ settings that only apply at start) was the old Windows launcher's job, so for now they
+  last until the game closes; set start-up options in `sotc.ini` instead (`SOTC_MODES` for 60 FPS
+  and 16x AF, the game folder, ...; all listed in `sotc.py`).
 
 | Key | What it does |
 |---|---|
@@ -105,7 +107,7 @@ the menu is open; **Esc** or F1 closes it.
 
 ### Texture quality
 
-In the launcher (**Quick settings → Textures**) and in the in-game menu (changes at once):
+In the in-game menu (changes at once):
 
 | Level | What it does | Possible problems |
 |---|---|---|
@@ -128,26 +130,32 @@ In the launcher (**Quick settings → Textures**) and in the in-game menu (chang
   is the likely fix: please report whether it helps. `SOTC_AMD64_LDS=0` turns it off.
 - **60 FPS:** since 0.60 the game targets 60 FPS itself (its PS4 Pro Performance mode), which
   should fix the 60 FPS physics (the 2nd colossus' wall, colossi "flying"); still being tested
-  there. `SOTC_MODES=af16` in the extra variables goes back to the old mode.
+  there. `SOTC_MODES=af16` in `sotc.ini` goes back to the old mode.
 - **Frame generation** (experimental): the health/stamina bars may shake (`SOTC_FG_HUDLESS=1`
   tries a HUD-less image), and it only matters at 30 FPS.
 - With 8 GB of video memory or less, pick a lower **Video memory use** level if the game runs out.
 
-### Download and use
+### Build and play
 
-1. Download `SotC-PC.zip` from [Releases](../../releases) and unzip it into a folder.
-2. Run **`SotC.exe`**. On first start the launcher searches the PC's drives for:
-   - the game folder (the CUSA08809 or CUSA08034 dump with `eboot.bin`, `sce_module` and `sce_sys`);
-   - the sound modules (`libSceNgs2.sprx` and `libSceUlt.sprx`) of an installed shadPS4
-     (`user/sys_modules`), which it copies to the port's data folder;
-   - a shadPS4 save of the game, which it offers to import;
-   - the game's DLCs, if any (shadPS4's `addcont` folder, or a folder with one subfolder per DLC).
-3. Check the **Game and saves** page. The **game library** works like shadPS4's.
-4. Click **PLAY**.
+Requirements: Linux on x86-64 with a CPU that has AVX, BMI1, LZCNT and MOVBE (Intel Haswell / AMD
+Zen or newer), a **Vulkan 1.3** GPU driver (Mesa RADV or ANV, or NVIDIA's), Python 3. **The game
+folder should be on an SSD** (NVMe best): on a hard disk new areas stutter much more.
 
-Requirements: Windows 10/11 64-bit and a **Vulkan 1.3** GPU (NVIDIA, AMD or Intel with a recent
-driver). No Python install needed. **The game folder should be on an SSD** (NVMe best): on a hard
-disk new areas stutter much more.
+1. Install the build tools and libraries. Arch / CachyOS:
+
+   ```
+   sudo pacman -S --needed git clang lld cmake ninja pkgconf python glslang vulkan-headers \
+       vulkan-icd-loader sdl3 libx11 xxhash ffmpeg boost fmt robin-map
+   ```
+
+   Other distributions: the same libraries under their names (pkg-config must find `vulkan`,
+   `sdl3`, `x11`, `libxxhash` and FFmpeg's `libav*`; without FFmpeg, build with
+   `BB_CMAKE_ARGS=-DBB_AVPLAYER=OFF`, the game does not use it). NixOS: `shell.nix`.
+2. Put the game dump next to this folder (`../CUSA08809` or `../CUSA08034`, the folder with
+   `eboot.bin`, `sce_module` and `sce_sys`), or set `SOTC_GAME_DIR=/path/to/it` in `sotc.ini`.
+   The 1.01 update (`CUSA08809-UPDATE`) and the DLC (`CUSA08809-DLC`) are found next to it.
+3. `bash run.sh`: it builds the port (`out/bb-probe` and `out/gpu/libbbgpu.so`; the first build
+   fetches the submodules) and starts the game. Later starts only rebuild what changed.
 
 | What | Where from | What for |
 |---|---|---|
@@ -158,45 +166,32 @@ The patch modes (60 FPS, 16x filtering) apply to EU 1.01 and US 1.00 (the same e
 other versions run at 30 FPS. Each release keeps its own saves (`user/savedata/1/<title ID>`),
 and only DLC of the same region is used.
 
-### Launcher features
+Settings are environment variables or `NAME=value` lines in `sotc.ini` (all of them are listed at
+the top of `sotc.py`): e.g. `SOTC_MODES=fps60,af16` for 60 FPS and 16x filtering,
+`SOTC_SYS_MODULES=/folder/with/the/sprx` for the console's sound modules. Controller support
+(DualShock 4, DualSense, Xbox) with mouse camera and key remapping
+([docs/sotc/README-SotC.md](docs/sotc/README-SotC.md)). The session log is `user/last_run.log`.
 
-Game library and automatic search, shadPS4 save import, 720p–4K output (the game renders at
-1080p, upscaled with FSR 1 + RCAS), PS4 Pro mode, 60 FPS and 16x AF modes, controller support
-(DualShock 4, DualSense, Xbox) with mouse camera, key remapping, Bluepoint engine cvars, desktop
-shortcut and a session log in `user/last_run.log`.
-
-In 60 FPS mode the title-screen attract demo averages ~67 FPS on an RTX 2060 SUPER, with
-29–34 FPS in its heaviest section. Vulkan only (no DirectX). AMD and Intel can enable the
-NVIDIA-only submission options under **Image and FPS > GPU work submission**.
+In the 60 FPS mode, gameplay at the Shrine of Worship runs at ~72 FPS on an i5-13600KF with a
+Radeon RX 6650 XT (`tools/sotc_bench_gameplay.py`). Vulkan only.
 
 **Do I need sound files?** Not since v0.75: the port's built-in mixer plays the sound. The two
-`.sprx` files are Sony firmware and may not be redistributed; if you have them, the launcher finds
-and copies yours automatically and the firmware plays the sound. **The game closed by itself?** Open an issue
-with `user/last_run.log`.
+`.sprx` files are Sony firmware and may not be redistributed. **The game closed by itself?** Open
+an issue with `user/last_run.log`.
 
 ---
 
-## Building
+## Development
 
-Windows with [MSYS2](https://www.msys2.org/) (CLANG64); packages:
-[packaging/windows/README.md](packaging/windows/README.md). To freeze `SotC.exe`: a Windows
-Python with PyInstaller and Pillow (`WINPYTHON`).
-
-```
-bash build.sh                              # out/bb-probe.exe
-bash packaging/windows/package_sotc.sh     # dist/SotC-PC.zip
-```
-
-Packaging refuses any `.sprx`/`.prx`: Sony firmware never goes into the package. Test tools:
-`tools/`. Diagnostic variables: [docs/sotc/README-SotC.md](docs/sotc/README-SotC.md).
+`bash build.sh` builds without starting the game (Clang with ThinLTO; with `pgo/bbgpu.profdata`,
+made by `tools/pgo_train.sh`, also profile-guided). Test tools: `tools/`. Diagnostic variables:
+[docs/sotc/README-SotC.md](docs/sotc/README-SotC.md). Never add game files or Sony firmware
+(`.sprx`/`.prx`) to the repository.
 
 ## Credits
 
 - [bloodborne_pc](https://github.com/Supermedo/bloodborne_pc) (Supermedo, deadinside28 and
-  forks): loader, native runtime and launcher. Original README: [docs/bbport](docs/bbport/README.md).
-  The launcher's look (`launcher/sotc_theme.py`) comes from its 1.9 launcher theme, with the
-  [Cinzel](https://github.com/NDISCOVER/Cinzel) and [Inter](https://github.com/rsms/inter) fonts
-  (SIL Open Font License).
+  forks): loader and native runtime. Original README: [docs/bbport](docs/bbport/README.md).
 - [shadPS4](https://github.com/shadps4-emu/shadPS4) and the shadPS4 SotC fork: Vulkan video core.
 - [Pink-shadPS4](https://github.com/luizgustavs/Pink-shadPS4) (luizgustavs): culling cvars, BPE
   heap guard, periodic submission, command recording thread, shader fixes (fetch-shader

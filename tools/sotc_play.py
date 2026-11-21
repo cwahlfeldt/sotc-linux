@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 """sotc: scripted run of Shadow of the Colossus.
 
-Restores out/save-template (unless --keep-save), starts out/bb-probe.exe and plays a schedule:
+Restores out/save-template (unless --keep-save), starts out/bb-probe and plays a schedule:
 
     python tools/sotc_play.py 120 25:options 27:up 28.5:cross 50:shot 60:ly=0:3000
 
@@ -55,9 +55,6 @@ def main():
     pad = out / 'pad.txt'
     pad.write_text('')
     env = dict(os.environ)
-    msys = os.environ.get('MSYS2_ROOT') or next((p for p in (r'C:\msys64', r'I:\msys64') if Path(p).is_dir()),
-                                                r'C:\msys64')
-    env['PATH'] = str(Path(msys) / 'clang64' / 'bin') + os.pathsep + env['PATH']
     env.update(BB_FRAME_DUMP_TRIGGER=str(out / 'dump.trigger'), BB_DUMP_DIR=str(out / 'dump'), BB_PAD_FILE=str(pad),
                BB_STACKS_TRIGGER=str(out / 'stacks.trigger'), SOTC_MENU_TRIGGER=str(out / 'menu.trigger'),
                SOTC_SET_TRIGGER=str(out / 'set.trigger'),
@@ -65,7 +62,7 @@ def main():
     for item in args.env:
         name, value = item.split('=', 1)
         env[name] = value
-    command = [str(out / 'bb-probe.exe'), str(out / 'boot-linked.bin'), '--content-profile', str(out / 'content.bin'),
+    command = [str(out / 'bb-probe'), str(out / 'boot-linked.bin'), '--content-profile', str(out / 'content.bin'),
                '--sotc-cpu', str(out / 'sotc-cpu.bin'), '--app0', GAME, '--user', str(out / 'user')]
     if args.patches:
         command += ['--patches', args.patches]

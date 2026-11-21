@@ -2,49 +2,9 @@
 set -euo pipefail
 cd -- "$(dirname -- "$0")"
 mkdir -p out
-# Windows: MSYS2 CLANG64 (packages in packaging/windows/README.md). The GPU library is static
-# there and CMake links bb-probe.exe as well. ThinLTO by default (BB_LTO=OFF disables it);
-# Clang PGO from pgo/bbgpu.profdata when present (tools/pgo_train.sh makes it).
-case $(uname -s) in
-MINGW*|MSYS*)
-    # shellcheck source=msys2-env.sh
-    source ./msys2-env.sh
-    for tool in clang cmake ninja pkg-config; do
-        command -v "$tool" >/dev/null || { echo "Need $tool from MSYS2 CLANG64 (packaging/windows/README.md)." >&2; exit 1; }
-    done
-    if [[ ! -f gpu/third_party/fsr-vulkan/CMakeLists.txt || ! -f gpu/third_party/imgui/imgui.h ||
-          ! -f gpu/third_party/xbyak/xbyak/xbyak.h ]]; then
-        git submodule update --init --recursive
-    fi
-    for patch in gpu/patches/fsr-vulkan/*.patch; do
-        if ! git -C gpu/third_party/fsr-vulkan apply --reverse --check "$PWD/$patch" 2>/dev/null; then
-            git -C gpu/third_party/fsr-vulkan apply "$PWD/$patch"
-        fi
-    done
-    # sotc: llvm-windres, binutils windres fails on build paths with spaces ("Unable to create
-    # temp file").
-    # sotc: BB_PGO=generate builds an instrumented exe (Clang profile in pgo/, see
-    # gpu/CMakeLists.txt); by default pgo/bbgpu.profdata is used when present.
-    pgo=${BB_PGO:-}
-    if [[ -z $pgo ]]; then
-        if [[ -f pgo/bbgpu.profdata ]]; then pgo=use; else pgo=off; fi
-    fi
-    mkdir -p pgo
-    cmake -S gpu -B out/gpu -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBB_PGO="$pgo" \
-        -DBB_PGO_DIR="$PWD/pgo" -DBB_LTO="${BB_LTO:-ON}" -DCMAKE_C_COMPILER=clang \
-        -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_RC_COMPILER=llvm-windres >/dev/null
-    echo "GPU library and loader: PGO $pgo, LTO ${BB_LTO:-ON}"
-    if ! ninja -C out/gpu bb-probe bb-gpu-capabilities > out/gpu-build.log 2>&1; then
-        grep -v '^\[' out/gpu-build.log | tail -40 >&2
-        echo 'Build failed (full log: out/gpu-build.log)' >&2; exit 1
-    fi
-    cp out/gpu/bb-probe.exe out/gpu/bb-gpu-capabilities.exe out/
-    echo "Built $PWD/out/bb-probe.exe"
-    exit 0
-    ;;
-esac
+# Linux build: out/bb-probe (the loader, C) and out/gpu/libbbgpu.so (the GPU library, CMake).
 if [[ -z ${CC:-} ]]; then
-    # sotc: clang first, the compiler of the Windows build and of shadPS4; GCC otherwise.
+    # sotc: clang first (shadPS4's compiler; the PGO profile in pgo/ is Clang's); GCC otherwise.
     CC=$(command -v clang || command -v cc || command -v gcc || true)
     if [[ -z $CC ]]; then
         for candidate in /nix/store/*-gcc-wrapper-*/bin/gcc; do
@@ -64,7 +24,7 @@ fi
 read -r -a includes <<< "$(pkg-config --cflags vulkan sdl3)"
 read -r -a libraries <<< "$(pkg-config --libs vulkan sdl3)"
 # GPU library (shadPS4 video core + drivers), built by CMake into out/gpu/libbbgpu.so.
-# BB_CMAKE_ARGS: extra CMake arguments (packaging/linux: -DBB_PORTABLE=ON -DBB_AVPLAYER=OFF ...).
+# BB_CMAKE_ARGS: extra CMake arguments (e.g. -DBB_AVPLAYER=OFF: no FFmpeg needed).
 # BB_PGO: generate (instrumented build that writes pgo/ while the game runs), use, off.
 # Default: use the profile in pgo/ when there is one for this compiler (Clang: pgo/bbgpu.profdata,
 # made by tools/pgo_train.sh; GCC: the .gcda files). BB_LTO=OFF disables link-time optimization.
@@ -99,10 +59,8 @@ if ! ninja -C out/gpu ${NINJA_FLAGS:-} bbgpu > out/gpu-build.log 2>&1; then
     grep -v '^\[' out/gpu-build.log | tail -40 >&2
     echo 'GPU library build failed (full log: out/gpu-build.log)' >&2; exit 1
 fi
-# $ORIGIN/gpu: packaged copies keep the library next to the binary without patching it.
-gpu=(-Lout/gpu -lbbgpu -Wl,-rpath,'$ORIGIN/gpu' -rdynamic)
-# BB_RELOCATABLE=1 (packaging/linux): only the binary's own folder, not this tree's path.
-[[ -n ${BB_RELOCATABLE:-} ]] || gpu+=(-Wl,-rpath,"$PWD/out/gpu")
+# $ORIGIN/gpu: a copy of out/ elsewhere still finds its library next to the binary.
+gpu=(-Lout/gpu -lbbgpu -Wl,-rpath,'$ORIGIN/gpu' -Wl,-rpath,"$PWD/out/gpu" -rdynamic)
 runtime=(src/runtime*.c)
 # Third-party decoders: compiled once, without this project's -Werror policy.
 atrac9=(third_party/LibAtrac9/C/src/*.c)

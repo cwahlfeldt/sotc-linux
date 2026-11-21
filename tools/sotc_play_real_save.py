@@ -40,15 +40,11 @@ def main():
     pad = out / 'pad.txt'
     pad.write_text('')
     env = dict(os.environ)
-    msys = os.environ.get('MSYS2_ROOT', r'C:\msys64')
-    env['PATH'] = str(Path(msys) / 'clang64' / 'bin') + os.pathsep + env['PATH']
     env.update(BB_PAD_FILE=str(pad), SOTC_FPS='1', SOTC_SAVE_PROMPT='auto')
     for item in args.env:
         name, value = item.split('=', 1)
         env[name] = value
-    # sotc_play_real_save: this MSYS2-built python's Path objects stringify with forward slashes
-    # even natively on Windows, which _winapi.CreateProcess can fail to resolve for the exe name.
-    command = [str((out / 'bb-probe.exe').resolve()).replace('/', '\\'), str(out / 'boot-linked.bin'),
+    command = [str(out / 'bb-probe'), str(out / 'boot-linked.bin'),
                '--content-profile', str(out / 'content.bin'), '--sotc-cpu', str(out / 'sotc-cpu.bin'),
                '--app0', GAME, '--user', str(out / 'user')]
     log = open(args.log, 'wb')

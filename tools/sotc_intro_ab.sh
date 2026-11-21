@@ -4,16 +4,17 @@
 # usage: tools/sotc_intro_ab.sh name [--env X=Y ...]
 cd "$(dirname "$0")/.."
 name=$1; shift
-export SOTC_GAME_DIR=${SOTC_GAME_DIR:-"I:/EMULADORES/Playstation 4/JOGOS/Shadow Of The Colossus/CUSA08809"}
+export SOTC_GAME_DIR=${SOTC_GAME_DIR:-"$PWD/../CUSA08809"}
+PY=${PY:-python3}  # with Pillow, for the score
 start=$(date +%s)
-timeout 300 /c/PyBuild312/python.exe tools/sotc_play.py 132 --keep-save --cmdline out/water.cmdline --patches out/water.patches \
+timeout 300 "$PY" tools/sotc_play.py 132 --keep-save --cmdline out/water.cmdline --patches out/water.patches \
     --env BB_VBLANK_HZ=120 --log "out/intro-ab-$name.txt" "$@" 126:shot 128:shot 130:shot >/dev/null 2>&1
 mkdir -p out/intro-ab
 i=0
 for f in $(find user/screenshots out/dump -name '*.png' -newermt "@$start" ! -name sheet.png 2>/dev/null | sort); do
     cp "$f" "out/intro-ab/$name-$i.png"; i=$((i+1))
 done
-/c/PyBuild312/python.exe - "$name" <<'PY'
+"$PY" - "$name" <<'PY'
 import sys, glob
 from PIL import Image, ImageFilter, ImageStat
 name = sys.argv[1]

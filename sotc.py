@@ -3,7 +3,7 @@
 """Shadow of the Colossus (CUSA08809 EU 1.01 or CUSA08034 US 1.00) on PC: prepares the game image
 and starts it.
 
-    python sotc.py                      (or double-click SotC.bat)
+    python3 sotc.py                     (or bash run.sh, which builds first)
 
 Settings (environment variables, or sotc.ini beside this script as NAME=value lines):
     SOTC_GAME_DIR     the dumped game folder (the one with eboot.bin); default ../CUSA08809,
@@ -12,7 +12,7 @@ Settings (environment variables, or sotc.ini beside this script as NAME=value li
                       libSceUlt.sprx (shadPS4's user/sys_modules). Without it a built-in mixer plays the sound.
                       These files are Sony firmware: they are never distributed with the port.
     SOTC_USER_DIR     saves, shader/pipeline caches; default ./user
-    SOTC_DATA_DIR     the folder of out/, user/ and sotc.ini when the port's is read-only (AppImage)
+    SOTC_DATA_DIR     the folder of out/, user/ and sotc.ini when the port's is read-only
     SOTC_UPDATE_DIR   optional: the game update; by default <game>-UPDATE or <game>-patch next to
                       the dump (as shadPS4); its files take the place of the base game's
     SOTC_DLC_DIR      optional: the game's DLC (one folder per add-on with sce_sys/param.sfo, the
@@ -23,18 +23,15 @@ Settings (environment variables, or sotc.ini beside this script as NAME=value li
                       fps60 (removes the 30 FPS cap; experimental, vblank at 120 Hz),
                       fps60game (the game's own 60 FPS target, as the PS4 Pro Performance mode;
                       with SOTC_FPS_CAP=off)
-                      hdr (HDR10 output and the game's HDR rendering; Windows HDR must be on)
+                      hdr (HDR10 output and the game's HDR rendering; the desktop must offer HDR)
     SOTC_RENDER_RES   optional: the game renders at WxH instead of 1920x1080 (e.g. 2560x1080 for
                       21:9, a wider view); the output follows its aspect; PS4 mode only
     SOTC_CVARS        engine settings, NAME=VALUE separated by spaces (e.g. r_motionBlurEnable=0)
     BB_GAMEPAD        the gamepad to use (its name or part of it), when several are connected
     key.<input>=Keys, pad.<input>=buttons   remap the controls (README.md, Controles)
-Linux: build.sh builds the native out/bb-probe, which runs by default. SOTC_NATIVE=0 runs the
-Windows port instead (build-linux.sh) under Wine (SOTC_WINE, else wine on PATH, else Steam's
-Proton) in the prefix WINEPREFIX (default ~/.local/share/sotc-pc/wine-prefix), with the cross
-build's CLANG64 DLLs (CLANG64_ROOT, default ~/.cache/sotc-clang64).
+build.sh builds out/bb-probe and its GPU library (out/gpu/libbbgpu.so), which this script starts.
 The image is prepared again only when the game, the modules or the scripts change.
-Extra arguments go to bb-probe.exe. Run from a console, the session is also saved to
+Extra arguments go to bb-probe. Run from a console, the session is also saved to
 <user>/last_run.log (the 4 before it as last_run.1.log ... last_run.4.log; a crash's log is
 copied to <user>/crashes).
 """
@@ -49,7 +46,7 @@ import time
 PORT = Path(__file__).resolve().parent
 SCRIPTS = PORT / 'scripts'
 # SOTC_DATA_DIR: where out/ (the prepared image), user/ (saves, caches) and sotc.ini live when the
-# port's own folder is read-only (the Linux AppImage); default the port's folder.
+# port's own folder is read-only; default the port's folder.
 DATA = Path(os.environ.get('SOTC_DATA_DIR') or PORT).resolve()
 SYS_MODULES = ('libSceUlt.sprx', 'libSceNgs2.sprx')
 
@@ -69,81 +66,15 @@ def load_ini():
                 os.environ.setdefault(name.strip(), value.strip())
 
 
-def no_console():
-    """Started without a console (the launcher): console programs must not open their own."""
-    if os.name != 'nt':
-        return 0
-    import ctypes
-    return 0 if ctypes.windll.kernel32.GetConsoleWindow() else subprocess.CREATE_NO_WINDOW
-
-
 def find_probe():
-    # Linux: the native build (build.sh) unless SOTC_NATIVE=0; else the Windows port under Wine.
-    if os.name != 'nt' and os.environ.get('SOTC_NATIVE', '1') != '0':
-        for candidate in (PORT / 'bin' / 'bb-probe', PORT / 'out' / 'bb-probe'):
-            if candidate.is_file() and os.access(candidate, os.X_OK):
-                return candidate
-    # out/cross: build-linux.sh (the Windows port cross built on Linux).
-    for candidate in (PORT / 'bin' / 'bb-probe.exe', PORT / 'out' / 'bb-probe.exe',
-                      PORT / 'out' / 'cross' / 'bb-probe.exe'):
-        if candidate.is_file():
-            return candidate
-    fail('bb-probe not found: build it with build.sh (Linux native, or Windows with MSYS2 CLANG64), '
-         'or build-linux.sh (the Windows port for Wine), or use a packaged build.')
-
-
-# Linux: bb-probe.exe runs under Wine. Without SOTC_WINE or a wine on PATH, Steam's Proton.
-PROTON_WINE = [Path.home() / root / 'steamapps/common' / proton / 'files/bin/wine'
-               for root in ('.local/share/Steam', '.steam/steam')
-               for proton in ('Proton - Experimental', 'Proton 10.0', 'Proton 9.0 (Beta)', 'Proton 9.0')]
-
-
-def find_wine(env):
-    named = env.get('SOTC_WINE')
-    if named:
-        return named
-    found = shutil.which('wine') or next((str(p) for p in PROTON_WINE if p.is_file()), None)
-    if not found:
-        fail('Wine not found: install wine, or Proton (Steam), or set SOTC_WINE to a wine binary.')
-    return found
-
-
-def wine_path(path):
-    """A Linux path as the game sees it under Wine (drive Z: is /)."""
-    return 'Z:' + str(Path(path).resolve()).replace('/', '\\')
-
-
-def wine_prefix():
-    """The default Wine prefix: outside the port's folder, since a prefix links Z: to / (and the
-    other drives to removable disks): editors and indexers would walk the whole system from it."""
-    data = Path(os.environ.get('XDG_DATA_HOME') or Path.home() / '.local/share')
-    return data / 'sotc-pc' / 'wine-prefix'
-
-
-def wine_setup(env, probe):
-    """The Wine side of a Linux run: prefix (WINEPREFIX, else wine_prefix()), the CLANG64 DLLs of
-    a cross build (build-linux.sh's sysroot), and the environment's paths as Z: paths."""
-    env.setdefault('WINEPREFIX', str(wine_prefix()))
-    # No Mono/Gecko install on the prefix's first start, no menu entries on the desktop.
-    env.setdefault('WINEDLLOVERRIDES', 'mscoree,mshtml,winemenubuilder.exe=d')
-    env.setdefault('WINEDEBUG', '-all')
-    if not (probe.parent / 'SDL3.dll').is_file():
-        sysroot = Path(env.get('CLANG64_ROOT') or Path.home() / '.cache/sotc-clang64') / 'clang64' / 'bin'
-        if not sysroot.is_dir():
-            fail(f'No SDL3.dll beside {probe} and no CLANG64 sysroot in {sysroot.parent.parent} '
-                 '(packaging/linux-cross/fetch_sysroot.py).')
-        # Wine's own vulkan-1.dll (system32) is found before WINEPATH's.
-        env['WINEPATH'] = ';'.join(filter(None, (wine_path(sysroot), env.get('WINEPATH'))))
-    for name, value in list(env.items()):
-        if name.startswith(('BB_', 'SOTC_')) and value.startswith('/'):
-            env[name] = wine_path(value)
+    probe = PORT / 'out' / 'bb-probe'
+    if not (probe.is_file() and os.access(probe, os.X_OK)):
+        fail('out/bb-probe not found: build it with build.sh (or start the game with run.sh).')
+    return probe
 
 
 def run_script(name, *args):
-    # Inside the packaged SotC.exe (PyInstaller) the executable runs the scripts itself.
-    script = ['--script'] if getattr(sys, 'frozen', False) else []
-    result = subprocess.run([sys.executable, *script, str(SCRIPTS / name), *map(str, args)], stdin=subprocess.DEVNULL,
-                            creationflags=no_console())
+    result = subprocess.run([sys.executable, str(SCRIPTS / name), *map(str, args)], stdin=subprocess.DEVNULL)
     if result.returncode:
         sys.exit(result.returncode)
 
@@ -251,7 +182,7 @@ def main():
     modes = env.get('SOTC_MODES', '')
     cvars = env.get('SOTC_CVARS')
     if cvars is None:
-        # Without the launcher: the culling settings of Pink-shadPS4 (same image, fewer GPU waits).
+        # The culling settings of Pink-shadPS4 (same image, fewer GPU waits).
         cvars = 'doIndexBufferCulling=0 doSunShadowIndexBufferCulling=0'
     if env.get('SOTC_NOTE'):
         print(f"sotc: {env['SOTC_NOTE']}", file=sys.stderr)
@@ -288,43 +219,34 @@ def main():
     # in 120 Hz vblanks).
     env.setdefault('BB_VBLANK_HZ', '120')
     if 'hdr' in modes.lower():
-        # HDR10 swapchain (Rec.2020 PQ, when Windows HDR is on); the game then offers HDR too.
+        # HDR10 swapchain (Rec.2020 PQ, when the desktop offers it); the game then offers HDR too.
         env.setdefault('BB_HDR', '1')
 
     probe = find_probe()
-    # Development builds run from the MSYS2 tree: its CLANG64 DLLs (SDL3, FFmpeg, ...).
-    if os.name == 'nt' and not (probe.parent / 'SDL3.dll').is_file():
-        clang64 = Path(env.get('MSYS2_ROOT', r'C:\msys64')) / 'clang64' / 'bin'
-        if clang64.is_dir():
-            env['PATH'] = f'{clang64}{os.pathsep}{env.get("PATH", "")}'
+    # The port's version (VERSION), for the window title and the in-game menu.
+    version = PORT / 'VERSION'
+    if version.is_file():
+        env.setdefault('SOTC_PORT_VERSION', version.read_text().strip())
     user = Path(env.get('SOTC_USER_DIR', DATA / 'user')).resolve()
     user.mkdir(parents=True, exist_ok=True)
     env.setdefault('BB_GPU_USER_DIR', str(user))
     # Controls: key.<input>= / pad.<input>= lines of sotc.ini remap keys and buttons (src/runtime_pad.c).
     env.setdefault('BB_CONFIG', str(DATA / 'sotc.ini'))
-    host = str
-    wine = os.name != 'nt' and probe.suffix == '.exe'
-    if wine:
-        wine_setup(env, probe)
-        host = wine_path
-    command = [host(probe), host(out / 'boot-linked.bin'), '--content-profile', host(out / 'content.bin'),
-               '--sotc-cpu', host(out / 'sotc-cpu.bin'), '--patches', host(out / 'patches.bin'),
-               *(['--sotc-cmdline', host(out / 'cmdline.bin')] if (out / 'cmdline.bin').is_file() else []),
-               '--app0', host(game), '--user', host(user), *sys.argv[1:]]
-    if wine:
-        command = [find_wine(env)] + command
-    # SOTC_WRAP: a JSON list put in front of the game, e.g. RenderDoc
-    # ["C:/Program Files/RenderDoc/renderdoccmd.exe", "capture", "-w", "-c", "<file>"]; F12 then
-    # captures the frame (SOTC_RDOC_SUBMITS submissions). On Linux it goes in front of wine
-    # (e.g. ["gamemoderun"] or ["mangohud"]).
+    command = [str(probe), str(out / 'boot-linked.bin'), '--content-profile', str(out / 'content.bin'),
+               '--sotc-cpu', str(out / 'sotc-cpu.bin'), '--patches', str(out / 'patches.bin'),
+               *(['--sotc-cmdline', str(out / 'cmdline.bin')] if (out / 'cmdline.bin').is_file() else []),
+               '--app0', str(game), '--user', str(user), *sys.argv[1:]]
+    # SOTC_WRAP: a JSON list put in front of the game, e.g. ["gamemoderun"], ["mangohud"] or RenderDoc
+    # ["renderdoccmd", "capture", "-w", "-c", "<file>"]; F12 then captures the frame
+    # (SOTC_RDOC_SUBMITS submissions).
     if env.get('SOTC_WRAP'):
         import json
         command = json.loads(env['SOTC_WRAP']) + command
-    # In a console the session also goes to user/last_run.log (as the launcher does; the launcher
-    # reads this script's output into its own log, so a pipe means it is not written here).
+    # In a console the session also goes to user/last_run.log; with the output piped (a script that
+    # keeps its own log) it is not written here.
     if not sys.stdout.isatty():
         def play():
-            return subprocess.run(command, stdin=subprocess.DEVNULL, creationflags=no_console()).returncode
+            return subprocess.run(command, stdin=subprocess.DEVNULL).returncode
         return with_range_retries(env, play)
     with open_session_log(user) as log:
         def play():
@@ -369,7 +291,7 @@ CRASH_LOGS_KEPT = 20
 
 def open_session_log(user):
     """A fresh user/last_run.log; the previous sessions' logs move to last_run.1.log (the one
-    before) ... last_run.4.log. Same files as the launcher (launcher/sotc_launcher_win.py)."""
+    before) ... last_run.4.log."""
     for i in range(LOGS_KEPT - 1, 0, -1):
         older = user / ('last_run.log' if i == 1 else f'last_run.{i - 1}.log')
         if older.is_file():
@@ -382,7 +304,7 @@ def open_session_log(user):
 
 def keep_crash_log(user, code):
     """After a session that ended with an error code, copies its log to
-    user/crashes/<date>_<time>_<code>.log (the last 20, and the last 5 minidumps, are kept)."""
+    user/crashes/<date>_<time>_<code>.log (the last 20 are kept)."""
     if code == 0:
         return
     import time
@@ -392,8 +314,6 @@ def keep_crash_log(user, code):
         stamp = time.strftime('%Y-%m-%d_%H-%M-%S')
         shutil.copy2(user / 'last_run.log', crashes / f'{stamp}_{code & 0xffffffff:#x}.log')
         for old in sorted(crashes.glob('*.log'))[:-CRASH_LOGS_KEPT]:
-            old.unlink()
-        for old in sorted(crashes.glob('*.dmp'))[:-5]:
             old.unlink()
     except OSError:
         pass

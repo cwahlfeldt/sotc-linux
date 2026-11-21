@@ -10,7 +10,7 @@ Load times vary between runs, so the cutscene skip is driven by the log, not by 
 
     python tools/sotc_bench_shrine.py [--measure 40] [--env NAME=VALUE ...]
 
-Needs out/bb-probe.exe and the prepared image in out/ (sotc.py), SOTC_GAME_DIR, and
+Needs out/bb-probe (build.sh) and the prepared image in out/ (sotc.py), SOTC_GAME_DIR, and
 out/bench.patches / out/bench.cmdline (tools/sotc_bench_shrine.sh writes them).
 Prints one summary line: "avg X FPS, min Y (...)", or "INVALID: ..." when the idle scene was
 never reached.
@@ -99,8 +99,6 @@ def main():
     pad = out / 'pad.txt'
     pad.write_text('')
     env = dict(os.environ)
-    msys = os.environ.get('MSYS2_ROOT', r'C:\msys64')
-    env['PATH'] = str(Path(msys) / 'clang64' / 'bin') + os.pathsep + env['PATH']
     env.update(BB_FRAME_DUMP_TRIGGER=str(out / 'dump.trigger'), BB_DUMP_DIR=str(out / 'dump'), BB_PAD_FILE=str(pad),
                BB_STACKS_TRIGGER=str(out / 'stacks.trigger'), BB_VBLANK_HZ='120', SOTC_FPS='1',
                SOTC_SAVE_PROMPT='auto')  # sotc: unattended runs never wait on a save prompt
@@ -111,7 +109,7 @@ def main():
         env['BB_PAD_RECORD'] = str(Path(args.record).resolve())
     if args.replay:
         env['BB_PAD_REPLAY'] = str(Path(args.replay).resolve())
-    command = [str(out / 'bb-probe.exe'), str(out / 'boot-linked.bin'), '--content-profile', str(out / 'content.bin'),
+    command = [str(out / 'bb-probe'), str(out / 'boot-linked.bin'), '--content-profile', str(out / 'content.bin'),
                '--sotc-cpu', str(out / 'sotc-cpu.bin'), '--app0', GAME, '--user', str(out / 'user'),
                '--patches', args.patches, '--sotc-cmdline', args.cmdline]
     log = open(args.log, 'wb')
