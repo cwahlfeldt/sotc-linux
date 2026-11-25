@@ -44,8 +44,22 @@ void NoteGameFrame();
 vk::Image Generate(vk::CommandBuffer cmdbuf, u32 frame_id, vk::Image frame_image, u32 width,
                    u32 height, vk::Image hudless_image);
 
-/// Present thread: the commands of Generate were submitted at `tick` of `scheduler`.
+/// Present thread: the commands of Generate were submitted at `tick` of `scheduler`. With Async,
+/// Generate recorded only the input copies into its command buffer; this submits FSR 3's passes
+/// to the compute queue, waiting for `tick`.
 void Submitted(Scheduler& scheduler, u64 tick);
+
+/// sotc: FSR 3's passes run on a compute queue of their own (SOTC_FSRFG_ASYNC=1, where the device
+/// has a compute-only family; off by default, see vk_instance.cpp). The presenter then waits for
+/// them on the CPU
+/// (AsyncWaitLast) before it records the present of the generated image, and makes that submit
+/// (and the next input copies) wait for AsyncSemaphore at AsyncLastValue, which is then already
+/// reached: a graphics submit waiting for unfinished compute work would hold up every graphics
+/// submit queued after it, the game's included.
+bool Async();
+vk::Semaphore AsyncSemaphore();
+u64 AsyncLastValue(); ///< 0: nothing submitted yet
+void AsyncWaitLast();
 
 /// Present thread, after the generated frame was presented: waits until the game frame is due
 /// (half the frame interval later).

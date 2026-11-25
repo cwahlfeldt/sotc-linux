@@ -93,7 +93,36 @@ double delay_sum_ms = 0.0; // generated frame presented after the game frame arr
 u32 delay_count = 0;
 u64 generated = 0, generated_logged = 0;
 
+// sotc: SOTC_FSRFG_ASYNC=1: FSR 3's passes on a compute-only queue (Instance::GetFgComputeQueue;
+// off: on the presenter's graphics command buffer as before). On the graphics queue they run
+// between the game's frames, and the game, which reads GPU results within its frame, waits for
+// them: 72 -> 60 game FPS at the Shrine on an RX 6650 XT, ~69 with SOTC_FSRFG_NO_WORK. On the
+// compute queue they share the shader cores with the game's work instead, which gained nothing
+// there (62.2 against 61.6 FPS) and showed the generated frame 5 ms later, so it is off by
+// default. Generate copies the inputs on the graphics queue (blits need it), the passes go to the
+// compute queue after that submission, and the presenter waits for them on the CPU before it
+// presents the result. The images both queues use are created concurrent; FSR 3's own resources
+// stay on the compute queue only. Present thread, except `on`/`family` (set by Init, read by
+// ConvertDepth).
+constexpr u32 kAsyncCmds = 4;
+struct AsyncQueue {
+    bool on = false;
+    vk::Queue queue;
+    u32 family = UINT32_MAX;
+    vk::CommandPool pool;
+    std::array<vk::CommandBuffer, kAsyncCmds> cmds{};
+    std::array<u64, kAsyncCmds> cmd_values{}; ///< timeline value of each one's last submit
+    u32 next_cmd = 0;
+    vk::Semaphore timeline;
+    u64 last_value = 0;        ///< the last value submitted
+    vk::CommandBuffer pending; ///< recorded by Generate, submitted by Submitted
+    u32 pending_slot = 0;
+};
+AsyncQueue async_q;
+OwnedImage mvec_copy; ///< the game's motion vectors, copied on the graphics queue (async)
+
 bool CreateImage(OwnedImage& img, vk::Format format, u32 width, u32 height) {
+    const std::array<u32, 2> families = {g_instance->GetGraphicsQueueFamilyIndex(), async_q.family};
     const VkImageCreateInfo info = static_cast<VkImageCreateInfo>(vk::ImageCreateInfo{
         .imageType = vk::ImageType::e2D,
         .format = format,
@@ -103,6 +132,9 @@ bool CreateImage(OwnedImage& img, vk::Format format, u32 width, u32 height) {
         .samples = vk::SampleCountFlagBits::e1,
         .tiling = vk::ImageTiling::eOptimal,
         .usage = kImageUsage,
+        .sharingMode = async_q.on ? vk::SharingMode::eConcurrent : vk::SharingMode::eExclusive,
+        .queueFamilyIndexCount = async_q.on ? static_cast<u32>(families.size()) : 0u,
+        .pQueueFamilyIndices = async_q.on ? families.data() : nullptr,
         .initialLayout = vk::ImageLayout::eUndefined,
     });
     const VmaAllocationCreateInfo alloc_info = {
@@ -174,11 +206,104 @@ void SetState(int state) {
     SotcStats::ov_fsr_state.store(state, std::memory_order_relaxed);
 }
 
+/// Async: the compute queue reached `value` (CPU wait).
+void AsyncWait(u64 value) {
+    if (!async_q.on || value == 0) {
+        return;
+    }
+    const vk::SemaphoreWaitInfo wait = {
+        .semaphoreCount = 1,
+        .pSemaphores = &async_q.timeline,
+        .pValues = &value,
+    };
+    const vk::Result r = g_instance->GetDevice().waitSemaphores(wait, UINT64_MAX);
+    if (r != vk::Result::eSuccess) {
+        static bool reported = false;
+        if (!reported) {
+            reported = true;
+            std::fprintf(stderr, "SOTC FSR3 FG: waiting for the compute queue failed (%s)\n",
+                         vk::to_string(r).c_str());
+        }
+    }
+}
+
+/// Async: whether the compute queue reached `value`.
+bool AsyncDone(u64 value) {
+    const auto [r, reached] = g_instance->GetDevice().getSemaphoreCounterValue(async_q.timeline);
+    return r != vk::Result::eSuccess || reached >= value;
+}
+
+/// Async: a compute command buffer to record FSR 3's passes into (Submitted submits it).
+vk::CommandBuffer AsyncBegin() {
+    const u32 slot = async_q.next_cmd;
+    async_q.next_cmd = (slot + 1) % kAsyncCmds;
+    AsyncWait(async_q.cmd_values[slot]);
+    const vk::CommandBuffer cmd = async_q.cmds[slot];
+    (void)cmd.reset();
+    (void)cmd.begin(vk::CommandBufferBeginInfo{
+        .flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit,
+    });
+    async_q.pending = cmd;
+    async_q.pending_slot = slot;
+    return cmd;
+}
+
+void InitAsync(const Instance& instance) {
+    const vk::Queue queue = instance.GetFgComputeQueue();
+    if (!queue) {
+        return;
+    }
+    const vk::Device device = instance.GetDevice();
+    const u32 family = instance.GetFgComputeQueueFamilyIndex();
+    auto [pool_result, pool] = device.createCommandPool(vk::CommandPoolCreateInfo{
+        .flags = vk::CommandPoolCreateFlagBits::eResetCommandBuffer,
+        .queueFamilyIndex = family,
+    });
+    if (pool_result != vk::Result::eSuccess) {
+        return;
+    }
+    auto [cmd_result, cmds] = device.allocateCommandBuffers(vk::CommandBufferAllocateInfo{
+        .commandPool = pool,
+        .level = vk::CommandBufferLevel::ePrimary,
+        .commandBufferCount = kAsyncCmds,
+    });
+    vk::SemaphoreTypeCreateInfo timeline_type = {
+        .semaphoreType = vk::SemaphoreType::eTimeline,
+        .initialValue = 0,
+    };
+    auto [sem_result, sem] = device.createSemaphore(vk::SemaphoreCreateInfo{
+        .pNext = &timeline_type,
+    });
+    if (cmd_result != vk::Result::eSuccess || sem_result != vk::Result::eSuccess) {
+        if (sem_result == vk::Result::eSuccess) {
+            device.destroySemaphore(sem);
+        }
+        device.destroyCommandPool(pool);
+        return;
+    }
+    std::copy_n(cmds.begin(), kAsyncCmds, async_q.cmds.begin());
+    async_q.queue = queue;
+    async_q.family = family;
+    async_q.pool = pool;
+    async_q.timeline = sem;
+    async_q.on = true;
+    std::fprintf(stderr,
+                 "SOTC FSR3 FG: passes on compute queue family %u (SOTC_FSRFG_ASYNC)\n",
+                 family);
+}
+
 /// Retires the FSR 3 frames whose commands the GPU finished.
 void RetireCompleted(bool wait_all) {
-    while (!in_flight.empty() && submit_scheduler) {
+    while (!in_flight.empty() && (async_q.on || submit_scheduler)) {
         const auto [id, tick] = in_flight.front();
-        if (wait_all) {
+        if (async_q.on) {
+            // Async: `tick` is the compute queue's timeline value.
+            if (wait_all) {
+                AsyncWait(tick);
+            } else if (!AsyncDone(tick)) {
+                break;
+            }
+        } else if (wait_all) {
             submit_scheduler->Wait(tick);
         } else if (!submit_scheduler->IsFree(tick)) {
             break;
@@ -193,11 +318,13 @@ void DestroyContext() {
         return;
     }
     RetireCompleted(true);
+    AsyncWait(async_q.last_value);
     ffxVkFsr3_3_1_6FrameGenerationContextDestroy(context);
     context = nullptr;
     DestroyImage(color);
     DestroyImage(output);
     DestroyImage(hudless_color);
+    DestroyImage(mvec_copy);
     output_initialised = false;
 }
 
@@ -379,6 +506,7 @@ void Init(const Instance& instance) {
     }
     depth_pipeline = std::move(pipeline);
     supported = true;
+    InitAsync(instance);
 
     // The HUD pass is optional: without it FSR 3 composes the HUD by itself, as before.
     ui_shader = CompileSPV(FG_UI_COMP, device);
@@ -551,6 +679,9 @@ vk::Image Generate(vk::CommandBuffer cmdbuf, u32 frame_id, vk::Image frame_image
         return {};
     }
     RetireCompleted(false);
+    // Async: the inputs below are overwritten on the graphics queue; the compute passes of the
+    // last frame read them (already done when its result was presented).
+    AsyncWait(async_q.last_value);
     // Interpolation needs the previous game frame to have gone through FSR 3.
     const bool reset = in.reset || history_game_frame + 1 != game_frames;
     count(in.reset ? 4 : reset ? 5 : 0);
@@ -645,16 +776,75 @@ vk::Image Generate(vk::CommandBuffer cmdbuf, u32 frame_id, vk::Image frame_image
         sotc_fsrfg_hudless = FgImage(hudless_color.image, kColorFormat, width, height,
                                      vk::ImageLayout::eGeneral, kImageUsage);
     }
+    // Async: the motion vectors (DLSS-G's input image, exclusive to the graphics queue) are
+    // copied to an image both queues may use.
+    auto mvec_in = FgImage(in.mvec, vk::Format::eR16G16Sfloat, in.width, in.height,
+                           vk::ImageLayout::eShaderReadOnlyOptimal, in.mvec_usage);
+    if (async_q.on) {
+        if (mvec_copy.width != in.width || mvec_copy.height != in.height) {
+            DestroyImage(mvec_copy); // its last reader finished (AsyncWait above)
+            if (!CreateImage(mvec_copy, vk::Format::eR16G16Sfloat, in.width, in.height)) {
+                std::fprintf(stderr, "SOTC FSR3 FG: cannot create the %ux%u motion vector copy\n",
+                             in.width, in.height);
+                failed = true;
+                SetState(2);
+                return {};
+            }
+        }
+        const std::array mvec_pre{
+            Barrier(in.mvec, vk::PipelineStageFlagBits2::eAllCommands,
+                    vk::AccessFlagBits2::eMemoryWrite, vk::ImageLayout::eShaderReadOnlyOptimal,
+                    vk::PipelineStageFlagBits2::eCopy, vk::AccessFlagBits2::eTransferRead,
+                    vk::ImageLayout::eTransferSrcOptimal),
+            Barrier(mvec_copy.image, vk::PipelineStageFlagBits2::eAllCommands,
+                    vk::AccessFlagBits2::eNone, vk::ImageLayout::eUndefined,
+                    vk::PipelineStageFlagBits2::eCopy, vk::AccessFlagBits2::eTransferWrite,
+                    vk::ImageLayout::eTransferDstOptimal),
+        };
+        cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+            .imageMemoryBarrierCount = static_cast<u32>(mvec_pre.size()),
+            .pImageMemoryBarriers = mvec_pre.data(),
+        });
+        const vk::ImageCopy mvec_region{
+            .srcSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+            .dstSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+            .extent = {in.width, in.height, 1},
+        };
+        cmdbuf.copyImage(in.mvec, vk::ImageLayout::eTransferSrcOptimal, mvec_copy.image,
+                         vk::ImageLayout::eTransferDstOptimal, mvec_region);
+        const std::array mvec_post{
+            Barrier(in.mvec, vk::PipelineStageFlagBits2::eCopy, vk::AccessFlagBits2::eTransferRead,
+                    vk::ImageLayout::eTransferSrcOptimal, vk::PipelineStageFlagBits2::eAllCommands,
+                    vk::AccessFlagBits2::eMemoryRead, vk::ImageLayout::eShaderReadOnlyOptimal),
+            Barrier(mvec_copy.image, vk::PipelineStageFlagBits2::eCopy,
+                    vk::AccessFlagBits2::eTransferWrite, vk::ImageLayout::eTransferDstOptimal,
+                    vk::PipelineStageFlagBits2::eAllCommands, vk::AccessFlagBits2::eMemoryRead,
+                    vk::ImageLayout::eGeneral),
+        };
+        cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+            .imageMemoryBarrierCount = static_cast<u32>(mvec_post.size()),
+            .pImageMemoryBarriers = mvec_post.data(),
+        });
+        mvec_in = FgImage(mvec_copy.image, vk::Format::eR16G16Sfloat, in.width, in.height,
+                          vk::ImageLayout::eGeneral, kImageUsage);
+    }
+    // FSR 3's passes: on the compute queue (async), else after the copies above.
+    const vk::CommandBuffer fg_cmd = async_q.on ? AsyncBegin() : cmdbuf;
+    const auto finish = [&](vk::Image result) {
+        if (async_q.on) {
+            (void)fg_cmd.end();
+        }
+        return result;
+    };
 
     const auto color_in = FgImage(color.image, kColorFormat, width, height,
                                   vk::ImageLayout::eGeneral, kImageUsage);
     FfxVkFsr3_3_1_6FrameGenerationPrepareInfo prepare{};
-    prepare.commandBuffer = static_cast<VkCommandBuffer>(cmdbuf);
+    prepare.commandBuffer = static_cast<VkCommandBuffer>(fg_cmd);
     prepare.color = color_in;
     prepare.depth = FgImage(depth_slots[frame_id].r32.image, vk::Format::eR32Sfloat, in.width,
                             in.height, vk::ImageLayout::eGeneral, kImageUsage);
-    prepare.motionVectors = FgImage(in.mvec, vk::Format::eR16G16Sfloat, in.width, in.height,
-                                    vk::ImageLayout::eShaderReadOnlyOptimal, in.mvec_usage);
+    prepare.motionVectors = mvec_in;
     prepare.renderWidth = in.width;
     prepare.renderHeight = in.height;
     prepare.jitterOffsetX = in.jitter[0];
@@ -692,13 +882,60 @@ vk::Image Generate(vk::CommandBuffer cmdbuf, u32 frame_id, vk::Image frame_image
     std::copy_n(in.fwd, 3, prepare.cameraForward);
     prepare.frameId = fsr_frame;
     prepare.reset = reset ? VK_TRUE : VK_FALSE;
-    recorded = true;
-    FfxVkFsr3_3_1_6FrameGenerationResult r =
-        ffxVkFsr3_3_1_6FrameGenerationContextRecordPrepare(context, &prepare);
+    // sotc: SOTC_FSRFG_NO_WORK=1 (measurement only): no FSR 3 passes, the game frame is copied as
+    // the "generated" one. The two presents and their pacing stay, so the FPS difference to a
+    // normal FSR 3 run is FSR 3's GPU work alone.
+    static const bool no_work = [] {
+        const char* v = std::getenv("SOTC_FSRFG_NO_WORK");
+        return v && v[0] == '1';
+    }();
+    FfxVkFsr3_3_1_6FrameGenerationResult r = FFX_VK_FSR3_3_1_6_FRAMEGEN_OK;
+    if (no_work) {
+        // A copy, not a blit: the compute queue (async) has no blits.
+        const std::array copy_pre{
+            Barrier(color.image, vk::PipelineStageFlagBits2::eAllCommands,
+                    vk::AccessFlagBits2::eMemoryWrite, vk::ImageLayout::eGeneral,
+                    vk::PipelineStageFlagBits2::eCopy, vk::AccessFlagBits2::eTransferRead,
+                    vk::ImageLayout::eTransferSrcOptimal),
+            Barrier(output.image, vk::PipelineStageFlagBits2::eAllCommands,
+                    vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+                    vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eCopy,
+                    vk::AccessFlagBits2::eTransferWrite, vk::ImageLayout::eTransferDstOptimal),
+        };
+        fg_cmd.pipelineBarrier2(vk::DependencyInfo{
+            .imageMemoryBarrierCount = static_cast<u32>(copy_pre.size()),
+            .pImageMemoryBarriers = copy_pre.data(),
+        });
+        const vk::ImageCopy region{
+            .srcSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+            .dstSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+            .extent = {width, height, 1},
+        };
+        fg_cmd.copyImage(color.image, vk::ImageLayout::eTransferSrcOptimal, output.image,
+                         vk::ImageLayout::eTransferDstOptimal, region);
+        const std::array copy_post{
+            Barrier(color.image, vk::PipelineStageFlagBits2::eCopy,
+                    vk::AccessFlagBits2::eTransferRead, vk::ImageLayout::eTransferSrcOptimal,
+                    vk::PipelineStageFlagBits2::eAllCommands, vk::AccessFlagBits2::eMemoryRead,
+                    vk::ImageLayout::eGeneral),
+            Barrier(output.image, vk::PipelineStageFlagBits2::eCopy,
+                    vk::AccessFlagBits2::eTransferWrite, vk::ImageLayout::eTransferDstOptimal,
+                    vk::PipelineStageFlagBits2::eAllCommands,
+                    vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+                    vk::ImageLayout::eGeneral),
+        };
+        fg_cmd.pipelineBarrier2(vk::DependencyInfo{
+            .imageMemoryBarrierCount = static_cast<u32>(copy_post.size()),
+            .pImageMemoryBarriers = copy_post.data(),
+        });
+    } else {
+        recorded = true;
+        r = ffxVkFsr3_3_1_6FrameGenerationContextRecordPrepare(context, &prepare);
+    }
     sotc_fsrfg_hudless = {}; // imported by RecordPrepare, for its dispatch too
-    if (r == FFX_VK_FSR3_3_1_6_FRAMEGEN_OK) {
+    if (r == FFX_VK_FSR3_3_1_6_FRAMEGEN_OK && !no_work) {
         FfxVkFsr3_3_1_6FrameGenerationDispatchInfo dispatch{};
-        dispatch.commandBuffer = static_cast<VkCommandBuffer>(cmdbuf);
+        dispatch.commandBuffer = static_cast<VkCommandBuffer>(fg_cmd);
         dispatch.color = color_in;
         dispatch.output = FgImage(output.image, kColorFormat, width, height,
                                   vk::ImageLayout::eGeneral, kImageUsage);
@@ -722,7 +959,7 @@ vk::Image Generate(vk::CommandBuffer cmdbuf, u32 frame_id, vk::Image frame_image
         const char* v = std::getenv("SOTC_FG_UI_COPY");
         return !v || v[0] != '0';
     }();
-    if (r == FFX_VK_FSR3_3_1_6_FRAMEGEN_OK && hudless_image && ui_copy && ui_pipeline) {
+    if (r == FFX_VK_FSR3_3_1_6_FRAMEGEN_OK && hudless_image && ui_copy && ui_pipeline && !no_work) {
         const auto fsr_written = Barrier(output.image, vk::PipelineStageFlagBits2::eAllCommands,
                                          vk::AccessFlagBits2::eMemoryWrite,
                                          vk::ImageLayout::eGeneral,
@@ -730,11 +967,11 @@ vk::Image Generate(vk::CommandBuffer cmdbuf, u32 frame_id, vk::Image frame_image
                                          vk::AccessFlagBits2::eShaderStorageRead |
                                              vk::AccessFlagBits2::eShaderStorageWrite,
                                          vk::ImageLayout::eGeneral);
-        cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+        fg_cmd.pipelineBarrier2(vk::DependencyInfo{
             .imageMemoryBarrierCount = 1,
             .pImageMemoryBarriers = &fsr_written,
         });
-        cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, *ui_pipeline);
+        fg_cmd.bindPipeline(vk::PipelineBindPoint::eCompute, *ui_pipeline);
         const std::array infos{
             vk::DescriptorImageInfo{.imageView = color.view, .imageLayout = vk::ImageLayout::eGeneral},
             vk::DescriptorImageInfo{.imageView = hudless_color.view,
@@ -750,11 +987,11 @@ vk::Image Generate(vk::CommandBuffer cmdbuf, u32 frame_id, vk::Image frame_image
                 .pImageInfo = &infos[i],
             };
         }
-        cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, *ui_layout, 0, writes);
+        fg_cmd.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, *ui_layout, 0, writes);
         const u32 params[2] = {width, height};
-        cmdbuf.pushConstants(*ui_layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(params),
+        fg_cmd.pushConstants(*ui_layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(params),
                              params);
-        cmdbuf.dispatch((width + 7) / 8, (height + 7) / 8, 1);
+        fg_cmd.dispatch((width + 7) / 8, (height + 7) / 8, 1);
     }
     if (r != FFX_VK_FSR3_3_1_6_FRAMEGEN_OK) {
         static u32 errors = 0;
@@ -768,19 +1005,19 @@ vk::Image Generate(vk::CommandBuffer cmdbuf, u32 frame_id, vk::Image frame_image
         }
         history_game_frame = ~0ULL;
         SetState(2);
-        return {};
+        return finish({});
     }
     const auto to_present = Barrier(output.image, vk::PipelineStageFlagBits2::eComputeShader,
                                     vk::AccessFlagBits2::eShaderWrite, vk::ImageLayout::eGeneral,
                                     vk::PipelineStageFlagBits2::eAllCommands,
                                     vk::AccessFlagBits2::eMemoryRead, vk::ImageLayout::eGeneral);
-    cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+    fg_cmd.pipelineBarrier2(vk::DependencyInfo{
         .imageMemoryBarrierCount = 1,
         .pImageMemoryBarriers = &to_present,
     });
     if (reset) {
         SetState(0);
-        return {};
+        return finish({});
     }
     SetState(1);
     if (log_level >= 1 && ++generated - generated_logged >= 600) {
@@ -788,16 +1025,77 @@ vk::Image Generate(vk::CommandBuffer cmdbuf, u32 frame_id, vk::Image frame_image
         std::fprintf(stderr, "SOTC FSR3 FG: %llu frames generated, game frame every %.1f ms\n",
                      static_cast<unsigned long long>(generated), interval_ms);
     }
-    return output.image;
+    return finish(output.image);
 }
 
 void Submitted(Scheduler& scheduler, u64 tick) {
+    if (async_q.on) {
+        // The passes Generate recorded: after this graphics submission (the input copies).
+        if (!async_q.pending) {
+            return;
+        }
+        const vk::Semaphore wait_semaphore = scheduler.GetWorkSemaphore()->Handle();
+        const vk::PipelineStageFlags wait_stage = vk::PipelineStageFlagBits::eAllCommands;
+        const u64 value = async_q.last_value + 1;
+        const vk::TimelineSemaphoreSubmitInfo timeline_info = {
+            .waitSemaphoreValueCount = 1,
+            .pWaitSemaphoreValues = &tick,
+            .signalSemaphoreValueCount = 1,
+            .pSignalSemaphoreValues = &value,
+        };
+        const vk::SubmitInfo submit = {
+            .pNext = &timeline_info,
+            .waitSemaphoreCount = 1,
+            .pWaitSemaphores = &wait_semaphore,
+            .pWaitDstStageMask = &wait_stage,
+            .commandBufferCount = 1,
+            .pCommandBuffers = &async_q.pending,
+            .signalSemaphoreCount = 1,
+            .pSignalSemaphores = &async_q.timeline,
+        };
+        const vk::Result r = async_q.queue.submit(submit);
+        async_q.pending = vk::CommandBuffer{};
+        if (r != vk::Result::eSuccess) {
+            if (r == vk::Result::eErrorDeviceLost) {
+                g_instance->ReportDeviceFault();
+            }
+            std::fprintf(stderr, "SOTC FSR3 FG: compute queue submit failed (%s)\n",
+                         vk::to_string(r).c_str());
+            recorded = false;
+            failed = true;
+            SetState(2);
+            return;
+        }
+        async_q.last_value = value;
+        async_q.cmd_values[async_q.pending_slot] = value;
+        if (recorded) {
+            recorded = false;
+            in_flight.emplace_back(fsr_frame, value);
+        }
+        return;
+    }
     if (!recorded) {
         return;
     }
     recorded = false;
     submit_scheduler = &scheduler;
     in_flight.emplace_back(fsr_frame, tick);
+}
+
+bool Async() {
+    return async_q.on;
+}
+
+vk::Semaphore AsyncSemaphore() {
+    return async_q.timeline;
+}
+
+u64 AsyncLastValue() {
+    return async_q.last_value;
+}
+
+void AsyncWaitLast() {
+    AsyncWait(async_q.last_value);
 }
 
 void NotePresent() {

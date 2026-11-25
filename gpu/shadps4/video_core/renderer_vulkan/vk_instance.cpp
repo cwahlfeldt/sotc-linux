@@ -546,7 +546,44 @@ bool Instance::CreateDevice() {
         }
         return p;
     }();
-    const std::array queue_infos = {
+    // sotc: SOTC_FSRFG_ASYNC=1: one queue of a compute-only family for FSR 3 frame generation
+    // (vk_fsrfg.cpp), so its passes run beside the game's graphics work. Off by default: on an
+    // RX 6650 XT (RADV, 25 Nov) the game ran 62.2 FPS with it against 61.6 without (noise is
+    // +-3), and the generated frame went out 6.4-7.1 ms after the game frame instead of 1.5 ms:
+    // the passes share the shader cores with the game's work wherever they run. Off: the queues
+    // as before.
+    u32 fg_family = UINT32_MAX;
+    u32 fg_index = 0;
+    if (const char* v = std::getenv("SOTC_FSRFG_ASYNC"); v && v[0] == '1') {
+        for (std::size_t i = 0; i < family_properties.size(); i++) {
+            const auto& family = family_properties[i];
+            const u32 index = static_cast<u32>(i);
+            if (index == queue_family_index || !(family.queueFlags & vk::QueueFlagBits::eCompute) ||
+                (family.queueFlags & vk::QueueFlagBits::eGraphics)) {
+                continue;
+            }
+            const u32 taken = cross_family && index == present_queue_family ? 1u : 0u;
+            if (family.queueCount > taken) {
+                fg_family = index;
+                fg_index = taken;
+                break;
+            }
+        }
+    }
+    // sotc: that queue at low global priority, so the game's graphics work goes first where both
+    // have work for the shader cores (SOTC_FSRFG_ASYNC_PRIORITY=0: the driver's default; low
+    // measured 62.2 FPS against 61.2 at the default).
+    vk::DeviceQueueGlobalPriorityCreateInfoKHR fg_priority = {
+        .globalPriority = vk::QueueGlobalPriorityKHR::eLow,
+    };
+    bool fg_low = false;
+    if (const char* v = std::getenv("SOTC_FSRFG_ASYNC_PRIORITY");
+        fg_family != UINT32_MAX && !(cross_family && fg_family == present_queue_family) &&
+        (!v || v[0] != '0')) {
+        fg_low = add_extension(VK_KHR_GLOBAL_PRIORITY_EXTENSION_NAME) ||
+                 add_extension(VK_EXT_GLOBAL_PRIORITY_EXTENSION_NAME);
+    }
+    std::array queue_infos = {
         vk::DeviceQueueCreateInfo{
             .queueFamilyIndex = queue_family_index,
             .queueCount = graphics_family_queues + (cull_queue_index ? 1u : 0u),
@@ -557,14 +594,28 @@ bool Instance::CreateDevice() {
             .queueCount = 1u,
             .pQueuePriorities = queue_priorities.data(),
         },
+        vk::DeviceQueueCreateInfo{},
     };
+    u32 queue_info_count = cross_family ? 2u : 1u;
+    if (fg_family != UINT32_MAX) {
+        if (cross_family && fg_family == present_queue_family) {
+            queue_infos[1].queueCount = 2u; // present at 0, frame generation at 1
+        } else {
+            queue_infos[queue_info_count++] = vk::DeviceQueueCreateInfo{
+                .pNext = fg_low ? &fg_priority : nullptr,
+                .queueFamilyIndex = fg_family,
+                .queueCount = 1u,
+                .pQueuePriorities = queue_priorities.data(),
+            };
+        }
+    }
 
     const auto vk11_features = feature_chain.get<vk::PhysicalDeviceVulkan11Features>();
     vk12_features = feature_chain.get<vk::PhysicalDeviceVulkan12Features>();
     vk13_features = feature_chain.get<vk::PhysicalDeviceVulkan13Features>();
     vk::StructureChain device_chain = {
         vk::DeviceCreateInfo{
-            .queueCreateInfoCount = cross_family ? 2u : 1u,
+            .queueCreateInfoCount = queue_info_count,
             .pQueueCreateInfos = queue_infos.data(),
             .enabledExtensionCount = static_cast<u32>(enabled_extensions.size()),
             .ppEnabledExtensionNames = enabled_extensions.data(),
@@ -789,6 +840,12 @@ bool Instance::CreateDevice() {
                  : dedicated_present_queue                  ? "second graphics-family queue"
                                                             : "shared with graphics",
                  present_queue_family, queue_family_index);
+    if (fg_family != UINT32_MAX) {
+        fg_compute_queue = device->getQueue(fg_family, fg_index);
+        fg_compute_family = fg_family;
+        std::fprintf(stderr, "GPU frame generation queue: family %u, queue %u, %s priority\n",
+                     fg_family, fg_index, fg_low ? "low" : "default");
+    }
     if (cull_queue_index) {
         cull_queue = device->getQueue(queue_family_index, cull_queue_index);
         std::fprintf(stderr, "SOTC CULL QUEUE: queue %u of graphics family %u%s\n",

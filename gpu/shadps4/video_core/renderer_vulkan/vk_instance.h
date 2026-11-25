@@ -89,6 +89,18 @@ public:
         return cull_queue;
     }
 
+    /// sotc: a queue of a compute-only family for FSR 3 frame generation (vk_fsrfg.cpp), so its
+    /// passes run beside the game's graphics work instead of after it; null unless
+    /// SOTC_FSRFG_ASYNC=1 and the device has such a family.
+    vk::Queue GetFgComputeQueue() const {
+        return fg_compute_queue;
+    }
+
+    /// sotc: the family of GetFgComputeQueue (UINT32_MAX when none).
+    u32 GetFgComputeQueueFamilyIndex() const {
+        return fg_compute_family;
+    }
+
     TracyVkCtx GetProfilerContext() const {
         return profiler_context;
     }
@@ -632,6 +644,8 @@ private:
     vk::Queue graphics_queue;
     vk::Queue cull_queue; ///< sotc: SOTC_CULL_QUEUE
     u32 cull_queue_index{}; ///< sotc: its index in the graphics family (0: none)
+    vk::Queue fg_compute_queue;          ///< sotc: GetFgComputeQueue
+    u32 fg_compute_family{UINT32_MAX};   ///< sotc: its family (UINT32_MAX: none)
     std::vector<vk::PhysicalDevice> physical_devices;
     std::vector<std::string> available_extensions;
     std::unordered_map<vk::Format, vk::FormatProperties3> format_properties;

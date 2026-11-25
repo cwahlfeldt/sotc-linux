@@ -1523,7 +1523,7 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
 
 bool Presenter::PresentGenerated(Frame* frame) {
     auto& scheduler = present_scheduler;
-    const auto cmdbuf = scheduler.CommandBuffer();
+    vk::CommandBuffer cmdbuf = scheduler.CommandBuffer();
     const vk::Image generated =
         FsrFg::Generate(cmdbuf, frame->id, frame->image, frame->width, frame->height,
                         frame->hudless ? frame->hudless->image : vk::Image{});
@@ -1539,7 +1539,23 @@ bool Presenter::PresentGenerated(Frame* frame) {
         scheduler.Flush(info);
         FsrFg::Submitted(scheduler, tick);
     };
-    if (!generated) {
+    if (FsrFg::Async()) {
+        // sotc: FSR 3's passes on their compute queue (vk_fsrfg.h, Async). This submit holds the
+        // input copies, after the last passes (finished: the wait is only the memory dependency);
+        // Submitted queues the passes behind it. The present of their result waits for them here
+        // on the CPU, so no graphics submit waits for the compute queue on the GPU.
+        if (const u64 last = FsrFg::AsyncLastValue()) {
+            info.AddWaitAll(FsrFg::AsyncSemaphore(), last);
+        }
+        submit();
+        if (!generated) {
+            return false; // FSR 3 history only (first frame, after a cut)
+        }
+        FsrFg::AsyncWaitLast();
+        info = SubmitInfo{};
+        info.AddWaitAll(FsrFg::AsyncSemaphore(), FsrFg::AsyncLastValue());
+        cmdbuf = scheduler.CommandBuffer();
+    } else if (!generated) {
         submit(); // FSR 3 history only (first frame, after a cut)
         return false;
     }
