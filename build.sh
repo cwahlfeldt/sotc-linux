@@ -55,7 +55,18 @@ cmake -S gpu -B out/gpu -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBB_PGO="$pg
     -DBB_LTO="${BB_LTO:-ON}" -DBB_PGO_DIR="$PWD/pgo" "${cmake_extra[@]}" ${BB_CMAKE_ARGS:-} >/dev/null
 echo "GPU library: PGO $pgo, LTO ${BB_LTO:-ON}"
 # A failed GPU build must stop here: an older libbbgpu.so would otherwise be used silently.
-if ! ninja -C out/gpu ${NINJA_FLAGS:-} bbgpu > out/gpu-build.log 2>&1; then
+# On a terminal ninja's [n/m] counter is shown on one line, so a long rebuild (a header many files
+# include, the ThinLTO link) does not look like a hang; everything still goes to the log.
+gpu_build() {
+    if [ -t 1 ]; then
+        ninja -C out/gpu ${NINJA_FLAGS:-} bbgpu 2>&1 | tee out/gpu-build.log |
+            awk '/^\[[0-9]+\/[0-9]+\]/ { printf "\r\033[K  %s %s", $1, $2; fflush() }
+                 END { printf "\r\033[K"; fflush() }'
+    else
+        ninja -C out/gpu ${NINJA_FLAGS:-} bbgpu > out/gpu-build.log 2>&1
+    fi
+}
+if ! gpu_build; then
     grep -v '^\[' out/gpu-build.log | tail -40 >&2
     echo 'GPU library build failed (full log: out/gpu-build.log)' >&2; exit 1
 fi

@@ -2008,7 +2008,7 @@ float FpsCounter() {
     // Frame generation (vk_framegen.h): DLSS-G (vk_dlssg.cpp) or FSR 3 (vk_fsrfg.cpp).
     switch (Vulkan::FrameGen::Current()) {
     case Vulkan::FrameGen::Mode::Off:
-        ImGui::TextColored(grey, SotcUi::T("Geração de quadros: desligada", "Frame generation: off"));
+        ImGui::TextColored(grey, "%s", SotcUi::T("Geração de quadros: desligada", "Frame generation: off"));
         break;
     case Vulkan::FrameGen::Mode::Dlss:
         if (const int fg = SotcStats::ov_fg_state.load(std::memory_order_relaxed); fg == 1) {
@@ -2016,19 +2016,19 @@ float FpsCounter() {
             const uint32_t n = shown ? shown : 2;
             ImGui::TextColored(green, SotcUi::T("DLSS-G x%u: ~%.0f FPS na tela", "DLSS-G x%u: ~%.0f FPS shown"), n, avg_fps * n);
         } else if (fg == 2) {
-            ImGui::TextColored(red, "DLSS-G : erreur (statut %#x)",
+            ImGui::TextColored(red, "DLSS-G: error (status %#x)",
                                SotcStats::ov_fg_status.load(std::memory_order_relaxed));
         } else {
-            ImGui::TextColored(grey, SotcUi::T("DLSS-G: aguardando (sem cena 3D)", "DLSS-G: waiting (no 3D scene)"));
+            ImGui::TextColored(grey, "%s", SotcUi::T("DLSS-G: aguardando (sem cena 3D)", "DLSS-G: waiting (no 3D scene)"));
         }
         break;
     case Vulkan::FrameGen::Mode::Fsr:
         if (const int fg = SotcStats::ov_fsr_state.load(std::memory_order_relaxed); fg == 1) {
             ImGui::TextColored(green, SotcUi::T("FSR 3 x2: ~%.0f FPS na tela", "FSR 3 x2: ~%.0f FPS shown"), avg_fps * 2);
         } else if (fg == 2) {
-            ImGui::TextColored(red, "FSR 3 : erreur (voir le journal)");
+            ImGui::TextColored(red, "FSR 3: error (see the log)");
         } else {
-            ImGui::TextColored(grey, SotcUi::T("FSR 3: aguardando (sem cena 3D)", "FSR 3: waiting (no 3D scene)"));
+            ImGui::TextColored(grey, "%s", SotcUi::T("FSR 3: aguardando (sem cena 3D)", "FSR 3: waiting (no 3D scene)"));
         }
         break;
     }
