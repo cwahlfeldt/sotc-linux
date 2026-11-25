@@ -1,5 +1,34 @@
 # Changelog
 
+## Unreleased (Linux)
+- ⚙️ **Settings kept between starts**: the in-game menu's choices (FPS mode, texture quality,
+  frame generation, volume and the ◆ settings) are saved in `user/settings.json`, with the
+  defaults the Windows releases used. Variables set in `sotc.ini` or the environment still win.
+- 🌑 **Soft shadows and ambient occlusion around Wander on AMD cards** (upstream #461): the
+  shader translator read the wrong address for the characters' capsule records, so they flickered
+  or were missing with direct memory access off (the AMD default). A GPU-written image whose small
+  mips overlap the next one is no longer freed every other frame.
+- 🛡️ **Shader variants keep their own resource layout** (upstream PR #422): a variant that
+  declares other textures than the first one of its program was created against the first one's
+  pipeline layout (`SOTC PERMUTATION ... images 16/13` in the log), invalid Vulkan that can read
+  garbage on AMD. FMask textures and ordinary ones now get separate variants.
+- 🛡️ **Two crash guards** (upstream PR #464): a game-heap block found already unlinked while saving
+  (`0x499cc`, after about an hour of play) is skipped like the other cleared objects, and the
+  statistics and eviction-compare threads fall back to working inline when a thread cannot be
+  created.
+- 🖥️ **Dynamic FPS on 75/100/165 Hz screens** (upstream #454): the step divides the refresh rate
+  (75 Hz → 37.5, 100 Hz → 50, 165 Hz → 41.25). **Textures above 1080p** (upstream #455): the
+  texture pool reserve is 0 at any render size above 1920×1080. `SOTC_FPS_DYNAMIC_SLOW_FPS` sets
+  the rate under which a frame counts as slow. The F1 menu logs it when a setting cannot be saved.
+- **The shader cache is rebuilt on the first start.**
+- Tools: `tools/sotc_ride_bench.py` (a world-streaming benchmark: Wander carried along a fixed
+  5.8 km loop by the engine's own commands, frame-time stats at 60 FPS) and a gameplay benchmark
+  that ignores the player's saved FPS limit and frame generation. `SOTC_WINDOW_BEHIND` works on
+  Linux.
+- Off by default, measured without a gain on an RX 6650 XT / i5-13600KF: `SOTC_FSRFG_ASYNC=1`
+  (FSR 3 frame generation on a compute queue of its own), `SOTC_PIN=1/2` (upstream PR #464's GPU
+  thread placement); `SOTC_FSRFG_NO_WORK=1` measures FSR 3's GPU cost.
+
 ## 0.76.2 — 2026-11-17
 - 🛠️ **Processadores Intel: o herói caindo através do chão e a queda na tela de título corrigidos** (desde a 0.76). Na preparação do jogo, a lista de funções das bibliotecas lidas pela emulação de BMI1/LZCNT/MOVBE apagava a lista de funções do próprio jogo (55.790 viravam 731). Sem ela, a emulação de SSE4a (todo processador Intel) entrava sem a proteção da pilha em 3 funções do jogo: física quebrada e, com a geração de quadros desligada, o jogo fechava ~10 s depois de abrir (guest 0xf42ce0). Agora as listas se somam. Não é preciso preparar o jogo de novo.
 
