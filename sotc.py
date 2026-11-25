@@ -91,7 +91,7 @@ def run_script(name, *args):
 
 # The shader version of the caches: bump it when a change makes the saved shaders and pipelines
 # wrong (shader_recompiler or renderer output); the next start clears the cache once.
-SHADER_CACHE_VERSION = '0.76.2'
+SHADER_CACHE_VERSION = '0.77'
 
 SETTINGS_DEFAULTS = {
     'ui_language': '', 'audio_channels': 'auto', 'audio_lfe': True, 'audio_device': '',
@@ -250,6 +250,18 @@ def screen_refresh_hz():
         sdl.SDL_Quit()
 
 
+def dynamic_fps_step(hz):
+    """The dynamic FPS step (SOTC_FPS_DYNAMIC): the refresh rate divided by the smallest whole number
+    that brings it to 50 or less, so every frame lasts the same number of refreshes (48 at 144 Hz, 40
+    at 120 Hz, 30 at 60 Hz, 50 at 100 Hz, 37.5 at 75 Hz, 41.25 at 165 Hz). Before #454 a rate that
+    48, 40 and 45 do not divide fell to 30, which does not divide 75, 100 or 165 Hz."""
+    hz = hz if hz and hz >= 30 else 60
+    divisor = 2
+    while hz / divisor > 50:
+        divisor += 1
+    return f'{hz / divisor:.2f}'.rstrip('0').rstrip('.')
+
+
 def desktop_language():
     """The menu language of the desktop (LANGUAGE, LC_ALL, LC_MESSAGES, LANG): pt, es, zh, ko, ru, else en."""
     for name in ('LANGUAGE', 'LC_ALL', 'LC_MESSAGES', 'LANG'):
@@ -318,10 +330,10 @@ def settings_env(env, s, settings_file, source):
     put('SOTC_FPS_CAP', '30' if fps_mode == '30' else 'off')
     put('SOTC_FPS_LIMIT', '60' if fps_mode == '60' else '0')
     # Dynamic FPS (videoout driver.cpp): with the 60 FPS limit, frames that cannot keep 60 lower it to
-    # a step that divides the screen's refresh (48 at 144 Hz, 40 at 120/240 Hz, 30 at 60 Hz).
+    # a step that divides the screen's refresh (dynamic_fps_step: 48 at 144/240 Hz, 40 at 120 Hz,
+    # 30 at 60 Hz, 37.5 at 75 Hz).
     if fps_mode == '60' and s.get('fps_dynamic', True) and 'SOTC_FPS_DYNAMIC' not in env:
-        hz = screen_refresh_hz()
-        env['SOTC_FPS_DYNAMIC'] = str(48 if hz % 48 == 0 else 40 if hz % 40 == 0 else 45 if hz % 45 == 0 else 30)
+        env['SOTC_FPS_DYNAMIC'] = dynamic_fps_step(screen_refresh_hz())
     put('BB_FULLSCREEN', '1' if s.get('fullscreen') else '0')
     put('BB_PRESENT_MODE', str(s.get('present_mode') or 'Mailbox'))
     if s.get('language'):

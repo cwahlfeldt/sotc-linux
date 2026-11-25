@@ -1510,7 +1510,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
             // sotc: SOTC_FPS_DYNAMIC: the 60 FPS limit lowered while the game cannot keep it.
             if (const int dyn = SotcFpsCap::dynamic_limit.load(std::memory_order_relaxed);
                 dyn > 0 && limit_vblanks == vblanks_for(60)) {
-                limit_vblanks = vblanks_for(dyn); // the vblank grid's rounding; paced: exact
+                limit_vblanks = vblanks_for(dyn / 100); // the vblank grid's rounding; paced: exact
             }
             const bool paced = SotcFpsCap::flip_pacer.load(std::memory_order_relaxed);
             if (limit_vblanks != 0 && !paced) {
@@ -1526,8 +1526,8 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
                     // a whole number of 120 Hz vblanks).
                     const int dyn = SotcFpsCap::dynamic_limit.load(std::memory_order_relaxed);
                     const std::chrono::nanoseconds limit_period =
-                        dyn > 0 && limit_vblanks == vblanks_for(dyn)
-                            ? std::chrono::nanoseconds{1'000'000'000 / dyn}
+                        dyn > 0 && limit_vblanks == vblanks_for(dyn / 100)
+                            ? std::chrono::nanoseconds{100'000'000'000LL / dyn}
                             : std::chrono::duration_cast<std::chrono::nanoseconds>(
                                   vblank_period * limit_vblanks);
                     limit_next = (now - limit_next < tick_period ? limit_next : now) + limit_period;
@@ -1581,7 +1581,15 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
                                    vblanks_for(60);
                 // A frame counts as slow below 50 FPS: 50-60 FPS stays at the 60 limit (the step only
                 // takes over where the game really cannot keep up).
-                constexpr auto frame_60 = std::chrono::nanoseconds{1'000'000'000 / 50};
+                // sotc: SOTC_FPS_DYNAMIC_SLOW_FPS (default 50; test #52 of MEMORIA-TESTES.md): the
+                // rate under which a frame counts as slow. At 50-53 FPS (the dense forest) a 144 Hz
+                // screen shows frames for 2 or 3 vblanks in turn (judder) and the step (48 = 3
+                // vblanks, even) never engaged; 57 lets it take those stretches.
+                static const auto frame_60 = std::chrono::nanoseconds{[] {
+                    const char* v = std::getenv("SOTC_FPS_DYNAMIC_SLOW_FPS");
+                    const long fps = v ? std::clamp(std::strtol(v, nullptr, 10), 30L, 59L) : 50L;
+                    return 1'000'000'000LL / fps;
+                }()};
                 // sotc: 19/11: a 2-3 s dip of an area change (39-42 FPS) took the step, which then
                 // held 48 for 10-15 s after the PC could do 60 again (the player saw that as the
                 // drop). SOTC_FPS_DYNAMIC_SLOW_MS (default 5000, was 1500): slow time before the
