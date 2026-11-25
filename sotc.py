@@ -91,7 +91,7 @@ def run_script(name, *args):
 
 # The shader version of the caches: bump it when a change makes the saved shaders and pipelines
 # wrong (shader_recompiler or renderer output); the next start clears the cache once.
-SHADER_CACHE_VERSION = '0.77'
+SHADER_CACHE_VERSION = '0.77-meta23'
 
 SETTINGS_DEFAULTS = {
     'ui_language': '', 'audio_channels': 'auto', 'audio_lfe': True, 'audio_device': '',

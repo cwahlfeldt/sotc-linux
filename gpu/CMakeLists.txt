@@ -294,6 +294,12 @@ target_link_libraries(bbgpu PUBLIC PkgConfig::X11)
 
 # Explicit test targets; neither launches the game nor needs a Vulkan device.
 add_executable(motion-history-test EXCLUDE_FROM_ALL ../tests/test_motion_history.cpp)
+add_executable(shader-permutations-test EXCLUDE_FROM_ALL ../tests/test_shader_permutations.cpp)
+target_compile_options(shader-permutations-test PRIVATE -UNDEBUG)
+target_include_directories(shader-permutations-test PRIVATE shim shadps4)
+target_link_libraries(shader-permutations-test PRIVATE Vulkan::Vulkan Boost::headers fmt::fmt
+    tsl::robin_map magic_enum::magic_enum)
+
 target_compile_options(motion-history-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 target_include_directories(motion-history-test PRIVATE ..)
 add_executable(motion-shader-test EXCLUDE_FROM_ALL ../tests/test_motion_shaders.cpp ../tests/test_gpu_runtime_stubs.cpp)

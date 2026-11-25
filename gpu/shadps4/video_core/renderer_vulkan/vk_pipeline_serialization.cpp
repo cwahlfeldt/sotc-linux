@@ -30,7 +30,9 @@ namespace Serialization {
 // 41/137 = ReadConst through v_readfirstlane'd pointer adds flattened, dynamic window 2048 dwords
 // (capsule shadows/AO without DMA; flatten_extended_userdata_pass.cpp).
 static const u32 ShaderBinaryVersion = Shader::LodFeedbackEnabled() ? 41u : 137u;
-static constexpr u32 ShaderMetaVersion = 21u;
+// sotc: 23 = each variant owns its layout; image/FMask specialization includes the FMask type
+// (upstream PR #422).
+static constexpr u32 ShaderMetaVersion = 23u;
 static constexpr u32 PipelineKeyVersion = 3u;
 } // namespace Serialization
 
@@ -414,37 +416,43 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage) 
     }
 
     auto [it_pgm, new_program] = program_cache.try_emplace(program->info.pgm_hash);
+    // sotc (upstream PR #422): every variant keeps the Info its SPIR-V was made from (the
+    // program's own Info for the first one loaded): a later variant may declare other resources,
+    // and its pipeline layout and bindings must follow its own module.
     if (new_program) {
-        {
-            WarmUpTimer timer{warmup_times.modules};
-            module = CompileSPV(spv, instance.GetDevice());
-        }
+        WarmUpTimer timer{warmup_times.modules};
+        module = CompileSPV(spv, instance.GetDevice());
         it_pgm.value() = std::move(program);
+        it_pgm.value()->InsertPermut(module, std::move(spec), perm_idx);
     } else {
-        const auto& it = std::ranges::find(it_pgm.value()->modules, spec, &Program::Module::spec);
-        if (it != it_pgm.value()->modules.end()) {
+        auto& cached = *it_pgm.value();
+        const auto it = std::ranges::find(cached.modules, spec, &Program::Module::spec);
+        if (it != cached.modules.end()) {
             // A matching permutation is valid only at its original index. A different index means
             // the store holds entries from more than one cache generation, so this pipeline is
             // left to compile at runtime.
-            const auto idx = std::distance(it_pgm.value()->modules.begin(), it);
-            if (perm_idx != idx) {
+            const auto idx = std::distance(cached.modules.begin(), it);
+            if (perm_idx != static_cast<size_t>(idx)) {
                 LOG_WARNING(Render_Vulkan,
                             "Cached permutation {} of {}_{:x} conflicts with index {}, skipping "
                             "preload",
                             perm_idx, program->info.hw_stage, program->info.pgm_hash, idx);
                 return false;
             }
+            // Existing pipelines can retain this Info: do not replace or free it on another load.
             module = it->module;
         } else {
+            if (perm_idx < cached.modules.size() && cached.modules[perm_idx].module) {
+                return false; // two different variants cannot occupy the same saved index
+            }
             WarmUpTimer timer{warmup_times.modules};
             module = CompileSPV(spv, instance.GetDevice());
+            auto info = std::make_unique<Shader::Info>(std::move(program->info));
+            cached.InsertPermut(module, std::move(spec), perm_idx, std::move(info));
         }
     }
-    // The specialization must reference the cached program's info, not the temporary one.
-    spec.info = &it_pgm.value()->info;
-    it_pgm.value()->InsertPermut(module, std::move(spec), perm_idx);
 
-    infos[stage] = &it_pgm.value()->info;
+    infos[stage] = &it_pgm.value()->ModuleInfo(perm_idx);
     modules[stage] = module;
     if (auto& fetch = it_pgm.value()->modules[perm_idx].spec.fetch_shader_data; !fetch.Empty()) {
         fetch_shader = &fetch;
