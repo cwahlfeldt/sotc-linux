@@ -2508,6 +2508,105 @@ static void *linux_thread_times(void *unused) {
     fflush(stderr);
     return NULL;
 }
+/* sotc (Linux): a sysfs CPU list ("0-11,16") as a set; 0 when the file is absent or empty. */
+static int read_cpu_list(const char *path, cpu_set_t *set) {
+    CPU_ZERO(set);
+    FILE *f=fopen(path,"r");
+    if (!f) return 0;
+    char text[256]={0};
+    if (!fgets(text,sizeof(text),f)) text[0]=0;
+    fclose(f);
+    for (char *p=text; *p && *p!='\n';) {
+        char *end;
+        const long first=strtol(p,&end,10);
+        if (end==p) break;
+        long last=first;
+        if (*end=='-') { p=end+1; last=strtol(p,&end,10); }
+        for (long cpu=first; cpu<=last && cpu<CPU_SETSIZE; ++cpu) if (cpu>=0) CPU_SET((int)cpu,set);
+        p=*end==',' ? end+1 : end;
+        if (*end!=',') break;
+    }
+    return CPU_COUNT(set)>0;
+}
+/* sotc (Linux): SOTC_PIN, upstream PR #464's thread placement (Windows; Ryzen 5 5600X, Shrine
+ * 59 -> 65 FPS; no gain on an i9-13900K under Windows), off by default while it is measured here.
+ * SOTC_PIN=1: the three heavy GPU threads (draw, command processor, recorder) each get a physical
+ * core of their own among the performance cores (cores 1-3; core 0 takes most interrupts), the
+ * other thread of those cores stays empty, and every other thread of the process keeps off them
+ * (on a hybrid CPU: the other P-cores and the E-cores). SOTC_PIN=2: the same three logical CPUs,
+ * but their siblings stay open to the other threads. While the game shows fewer than 25 frames
+ * a second (loading uses every thread) the placement is released: every thread back to the
+ * process's CPUs, the GPU threads to the P-cores (as BbThreads::PreferPerformanceCores leaves
+ * them). Re-applied every 1-2 s, since threads come and go. */
+static void *linux_thread_placement(void *unused) {
+    (void)unused;
+    const int mode=atoi(getenv("SOTC_PIN"));
+    cpu_set_t process, pcores, closed, others, pinned[3];
+    if (mode<1 || mode>2 || sched_getaffinity(0,sizeof(process),&process)) return NULL;
+    if (!read_cpu_list("/sys/devices/cpu_core/cpus",&pcores)) pcores=process; /* not hybrid */
+    CPU_AND(&pcores,&pcores,&process);
+    /* The physical cores among the P-cores, in order: the first logical CPU of each. */
+    int first[64], cores=0;
+    cpu_set_t seen, sibling_sets[64];
+    CPU_ZERO(&seen);
+    for (int cpu=0; cpu<CPU_SETSIZE && cores<64; ++cpu) {
+        if (!CPU_ISSET(cpu,&pcores) || CPU_ISSET(cpu,&seen)) continue;
+        char path[96];
+        snprintf(path,sizeof(path),"/sys/devices/system/cpu/cpu%d/topology/thread_siblings_list",cpu);
+        if (!read_cpu_list(path,&sibling_sets[cores])) { CPU_ZERO(&sibling_sets[cores]); CPU_SET(cpu,&sibling_sets[cores]); }
+        CPU_OR(&seen,&seen,&sibling_sets[cores]);
+        first[cores++]=cpu;
+    }
+    if (cores<5) {
+        fprintf(stderr,"SOTC PIN: %d performance cores, too few for the placement: off\n",cores);
+        return NULL;
+    }
+    CPU_ZERO(&closed);
+    for (int i=0;i<3;++i) {
+        CPU_ZERO(&pinned[i]);
+        CPU_SET(first[i+1],&pinned[i]);
+        if (mode==1) CPU_OR(&closed,&closed,&sibling_sets[i+1]);
+        else CPU_OR(&closed,&closed,&pinned[i]);
+    }
+    CPU_ZERO(&others);
+    for (int cpu=0; cpu<CPU_SETSIZE; ++cpu) if (CPU_ISSET(cpu,&process) && !CPU_ISSET(cpu,&closed)) CPU_SET(cpu,&others);
+    static const char *const wanted[3]={"shadPS4:GpuDraw","shadPS4:GpuComm","shadPS4:GpuReco"};
+    uint64_t flips_before=bbgpu_flip_count();
+    double time_before=clock_seconds(CLOCK_MONOTONIC);
+    int placed_mode=-1, told=0;
+    const pid_t self=gettid();
+    for (;;) {
+        sleep(placed_mode==1 ? 1 : 2);
+        const uint64_t flips_now=bbgpu_flip_count();
+        const double time_now=clock_seconds(CLOCK_MONOTONIC);
+        const double fps=time_now>time_before ? (double)(flips_now-flips_before)/(time_now-time_before) : 0.0;
+        flips_before=flips_now; time_before=time_now;
+        const int playing=fps>=25.0;
+        if (!playing && placed_mode==0) continue; /* already released */
+        placed_mode=playing;
+        DIR *dir=opendir("/proc/self/task");
+        int placed=0;
+        for (struct dirent *e; dir && (e=readdir(dir));) {
+            const pid_t tid=(pid_t)atoi(e->d_name);
+            if (tid<=0 || tid==self) continue;
+            char path[64], name[32]={0};
+            snprintf(path,sizeof(path),"/proc/self/task/%d/comm",(int)tid);
+            FILE *f=fopen(path,"r");
+            if (f) { if (fgets(name,sizeof(name),f)) name[strcspn(name,"\n")]=0; fclose(f); }
+            const cpu_set_t *mask=playing ? &others : &process;
+            for (int i=0;i<3;++i) if (!strncmp(name,wanted[i],15)) { mask=playing ? &pinned[i] : &pcores; ++placed; }
+            (void)sched_setaffinity(tid,sizeof(*mask),mask);
+        }
+        if (dir) closedir(dir);
+        if (!told && playing && placed==3) {
+            told=1;
+            fprintf(stderr,"SOTC PIN %d: GPU draw / command processor / recorder on CPUs %d, %d, %d (own cores%s), "
+                    "the other threads on %d CPUs\n",mode,first[1],first[2],first[3],
+                    mode==1 ? ", siblings empty" : "",CPU_COUNT(&others));
+        }
+    }
+    return NULL;
+}
 static void start_thread(void *(*fn)(void *), void *arg) {
     pthread_t thread;
     if (!pthread_create(&thread,NULL,fn,arg)) pthread_detach(thread);
@@ -2969,6 +3068,7 @@ int main(int argc, char **argv) {
     if (gpu_enabled && !(getenv("SOTC_WATCHDOG") && getenv("SOTC_WATCHDOG")[0]=='0')) start_thread(hang_watchdog,NULL);
     if (getenv("SOTC_PROFILE")) start_thread(linux_profiler,(void *)getenv("SOTC_PROFILE"));
     if (getenv("SOTC_THREAD_TIMES")) start_thread(linux_thread_times,NULL);
+    if (getenv("SOTC_PIN")) start_thread(linux_thread_placement,NULL);
     /* Linux: only for a game on a hard disk (SOTC_PREFETCH=1: always). Reading 13 GB ahead fills
      * the page cache, and memory pressure monitors (systemd-oomd) may then end the session. */
     if (app0 && (getenv("SOTC_PREFETCH") ? getenv("SOTC_PREFETCH")[0]=='1' : game_disk_rotational==1)) {
