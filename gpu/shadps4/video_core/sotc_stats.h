@@ -289,13 +289,13 @@ inline bool LogThrottled(const char* tag, int64_t min_interval_ns = 200'000'000)
 }
 
 /// sotc: SOTC_DRAW_SPLIT=1 (with SOTC_FPS): where the draw thread's time goes, the "SOTC DRAW
-/// SPLIT" lines (videoout/driver.cpp; step 0 of docs/sotc/PLANO-THREAD-DESENHO.md). "draw busy"
+/// SPLIT" lines (videoout/driver.cpp; step 0 of docs/sotc/PLAN-DRAW-THREAD.md). "draw busy"
 /// counts every wait inside an operation (flips, GPU waits, readbacks) as busy; these counters
 /// separate the operations, the binds and the waits, in TSC ticks (one rdtsc per edge), and the
 /// printer reads the CPU time of the draw, command processor and recorder threads. Counting only:
 /// nothing else changes.
 inline const bool kDrawSplit = std::getenv("SOTC_DRAW_SPLIT") != nullptr;
-/// sotc: SOTC_VIS_DIRECT=1 (needs SOTC_PC_MEMORY=1; docs/sotc/MODELO-MEMORIA-PC.md steps 3 and 4):
+/// sotc: SOTC_VIS_DIRECT=1 (needs SOTC_PC_MEMORY=1; docs/sotc/PC-MEMORY-MODEL.md steps 3 and 4):
 /// the compute shaders that write the visibility bitmaps the game scans every frame (eboot
 /// 0x1a6d60) write them straight into the game's memory (the imported backing view) instead of
 /// the arena, so the game's reads no longer fault and wait for a readback; the next end-of-pipe

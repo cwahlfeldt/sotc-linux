@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // sotc: SOTC_CULL_QUEUE=1 -- the visibility (cull) dispatches of the programs in
 // SOTC_CULL_QUEUE_PROGRAMS (default 0x50784801) run on a second queue of the graphics family
-// (docs/sotc/PLANO-FILA-CULL.md). On the single graphics queue each of them started ~10 ms of GPU
+// (docs/sotc/PLAN-CULL-QUEUE.md). On the single graphics queue each of them started ~10 ms of GPU
 // time after its inputs were ready, queued behind unrelated work, and the game waited for its
 // result (the visibility bitmap) in the same frame.
 //

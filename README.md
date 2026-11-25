@@ -77,7 +77,7 @@ Redesigned with a Shadow of the Colossus aesthetic (night stone, golden typograp
 | **0.0.12** | **Sharp textures back, without crashes:** fixed the memory corruption that closed the game after loading a save, and texture streaming is back (much sharper rocks and walls). **Water:** splashes, rings and foam while swimming; the lake reflects the sky and the sun's glint; environment reflections use each probe's correct cubemap (fix from Pink-shadPS4). |
 | **0.0.11** | Fixed the "colored garbage" grass texture of 0.0.10. |
 
-Full details in the [CHANGELOG](CHANGELOG.md) (in Portuguese).
+Full details in the [CHANGELOG](CHANGELOG.md).
 
 ### In-game menu and shortcuts
 

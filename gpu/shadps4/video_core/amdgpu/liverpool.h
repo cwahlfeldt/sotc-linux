@@ -155,7 +155,7 @@ public:
         }
     }
 
-    /// sotc: SOTC_RB_SAFEPOINT=1 (plan PLANO-TROCA-DE-AREA etapa 3): the finish of a guest
+    /// sotc: SOTC_RB_SAFEPOINT=1 (plan PLAN-AREA-CHANGE step 3): the finish of a guest
     /// readback (applying data the GPU already copied) waits in a queue of its own that the draw
     /// thread serves between ops, like the commands, and also at safe points inside long ops
     /// (between the buffers and the textures of a bind: Safepoint). func(at_safepoint) returns

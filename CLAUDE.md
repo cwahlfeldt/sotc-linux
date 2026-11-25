@@ -22,8 +22,9 @@ No game files or Sony firmware are in the repo, and none may be added. Running t
 dump (`SOTC_GAME_DIR`, default `../CUSA08809`) and, for sound, the user's own
 `libSceNgs2.sprx`/`libSceUlt.sprx` (`SOTC_SYS_MODULES`).
 
-User-facing docs (README, CHANGELOG, `docs/sotc/*`) are written in Portuguese (README also has
-English). Code comments are English.
+Docs (README, CHANGELOG, `docs/sotc/*`) and code comments are written in English. Older code
+comments and some log strings (`SOTC_T(pt, en)`) still carry Portuguese; translate them when you touch
+them, but do not add new Portuguese text.
 
 ## Build / run / test
 
@@ -135,14 +136,13 @@ newer ones appear in `CHANGELOG.md` entries. Session log goes to `user/last_run.
 - Commit subjects are prefixed by area: `shader:`, `shader_recompiler:`, `vulkan:`, `sotc:`,
   `linux:`, `docs:`, `diagnostics:`, `lod stats:`; releases are `Release X.YY: <summary>`.
 - A release bumps `VERSION` (sotc.py passes it to the game as `SOTC_PORT_VERSION`: window title,
-  in-game menu), the version/table in `README.md` (both languages), and adds a Portuguese
-  `CHANGELOG.md` entry.
+  in-game menu), the version/table in `README.md`, and adds a `CHANGELOG.md` entry.
 - **Every default changed for the better goes into `DEFAULT_UPGRADES`** (`sotc.py`, by version):
   settings saved by an older version keep their old value otherwise. `load_settings` applies each
   entry once, when `<user>/settings.json` was saved by an older `settings_version`. User rule: an
   update turns all its improvements on automatically.
 - Changes to recompiler/shader output make the user's shader cache wrong: bump
   `SHADER_CACHE_VERSION` in `sotc.py` (the next start clears the cache once, `check_shader_cache`),
-  and the CHANGELOG entry notes "O cache de shaders é refeito na primeira abertura".
+  and the CHANGELOG entry notes "The shader cache is rebuilt on the first start".
 - C code: C11, `-Wall -Wextra -Werror`; third-party decoders (LibAtrac9) are compiled separately
   without `-Werror`.

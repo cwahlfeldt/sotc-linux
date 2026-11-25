@@ -1,214 +1,214 @@
-# Camino rápido exacto para los draws de G-buffer (color + profundidad): diseño
+# Exact fast path for G-buffer draws (colour + depth): design
 
-2026-10-26. Fase 1 (solo lectura: ningún fichero de `gpu/`, `src/`, `tools/`, `scripts/` tocado; sin compilar ni lanzar). Continúa
-[DEPTH-FASTPATH.md](DEPTH-FASTPATH.md) §8 ("extensión barata sin hacer"). Marcas: [M] medido (logs `out/run-dftp.txt`, `out/run-depth-ph.txt`),
-[C] leído en el código, [E] estimado, [I] inferencia. Las líneas son del árbol actual (con los cambios sin commitear del camino de profundidad).
+2026-10-26. Phase 1 (read-only: no file in `gpu/`, `src/`, `tools/`, `scripts/` touched; nothing built or launched). Continues
+[DEPTH-FASTPATH.md](DEPTH-FASTPATH.md) §8 ("a cheap extension not done"). Marks: [M] measured (logs `out/run-dftp.txt`, `out/run-depth-ph.txt`),
+[C] read in the code, [E] estimated, [I] inference. The line numbers are from the current tree (with the depth path's uncommitted changes).
 
-## 0. Resumen
+## 0. Summary
 
-- El draw de G-buffer (clase "G-buffer" = `mrt_mask` con el bit 4, `ClassOf`, `vk_rasterizer.cpp:290`; ~7 destinos de color + profundidad) sale de
-  `BeginRenderingFast` por la puerta `mrt_mask != 0` (`vk_rasterizer.cpp:4011-4014`) y ejecuta `BeginRendering` completo
-  (`vk_rasterizer.cpp:4112-4290`) en cada draw: por destino `GetImage`, `UpdateImage`, `SetBackingSamples`, `FindRenderTarget`, `TestAndTouchMeta`,
-  `Transit` y rellenar el `RenderState`; luego la profundidad (`FindDepthTarget`, meta HTile, `Transit`). El estado dinámico (`dyn` 0.03 µs) y
-  `PrepareRenderState` (memo por series, 99% de aciertos) **ya** están cubiertos por el camino de profundidad: lo que queda es `BeginRendering`.
-- [M] El `RenderState` de un draw de G-buffer es idéntico al del draw anterior en el ~100% de los casos (`same%: rstate=100`, `run-dftp.txt`,
-  `run-depth-ph.txt`), y `PrepareRenderState` acierta en el 99.3% de todos los draws (`prep hit 1041427 miss 7149` de 1.05 M). La mecánica de
-  `BeginRenderingFast` se extiende a N destinos con las mismas series (RelRender + RelColor), `ImageSetGeneration`, `gpu_modified_epoch` y `MetaEpoch`, más
-  comprobaciones por destino (flags, `backing`, `TransitIsNoop`, `binding.is_bound`, muestras de la clave del pipeline).
-- **Ahorro realista: 0.15-0.35 µs por draw de G-buffer = 0.4-0.8 ms/frame en el templo pesado [E], no los 1.7 ms del techo** (0.70 µs x 2465). Motivo (§5): los
-  0.70 µs son con `SOTC_DRAW_PHASES` y llevan ~42 lecturas de `rdtsc` dentro de `BeginRendering` (5 vueltas por destino), y la repetición no es gratis
-  (~0.2-0.25 µs para 7 destinos + profundidad). **Paso 0 obligatorio antes de implementar: medir `BeginRendering` sin las vueltas** (§6). Si el coste real es
-  < ~0.35 µs, el beneficio no justifica el riesgo y la palanca mejor es `BindTextures` (§7).
-- Implementación: memo propio `gb_memo` (no comparte hueco con `df_memo`), interruptor nuevo `BbToggle::GBufferFastPath` (bit 29 si está libre, §4.1; si no, bit 31),
-  VERIFY que reproduce los efectos, ejecuta el `BeginRendering` completo encima y compara instantánea por destino + `RenderState` byte a byte.
+- The G-buffer draw (class "G-buffer" = `mrt_mask` with bit 4, `ClassOf`, `vk_rasterizer.cpp:290`; ~7 colour targets + depth) leaves
+  `BeginRenderingFast` through the `mrt_mask != 0` gate (`vk_rasterizer.cpp:4011-4014`) and runs the full `BeginRendering`
+  (`vk_rasterizer.cpp:4112-4290`) in every draw: per target `GetImage`, `UpdateImage`, `SetBackingSamples`, `FindRenderTarget`, `TestAndTouchMeta`,
+  `Transit` and filling in the `RenderState`; then the depth (`FindDepthTarget`, HTile meta, `Transit`). The dynamic state (`dyn` 0.03 µs) and
+  `PrepareRenderState` (memo by serials, 99% hits) are **already** covered by the depth path: what is left is `BeginRendering`.
+- [M] A G-buffer draw's `RenderState` is identical to the previous draw's in ~100% of cases (`same%: rstate=100`, `run-dftp.txt`,
+  `run-depth-ph.txt`), and `PrepareRenderState` hits in 99.3% of all draws (`prep hit 1041427 miss 7149` of 1.05 M). The mechanics of
+  `BeginRenderingFast` extend to N targets with the same serials (RelRender + RelColor), `ImageSetGeneration`, `gpu_modified_epoch` and `MetaEpoch`, plus
+  per-target checks (flags, `backing`, `TransitIsNoop`, `binding.is_bound`, the pipeline key's samples).
+- **Realistic saving: 0.15-0.35 µs per G-buffer draw = 0.4-0.8 ms/frame in the heavy temple [E], not the ceiling's 1.7 ms** (0.70 µs x 2465). Reason (§5): the
+  0.70 µs are with `SOTC_DRAW_PHASES` and carry ~42 `rdtsc` reads inside `BeginRendering` (5 laps per target), and the repetition is not free
+  (~0.2-0.25 µs for 7 targets + depth). **Step 0 is mandatory before implementing: measure `BeginRendering` without the laps** (§6). If the real cost is
+  < ~0.35 µs, the benefit does not justify the risk and the better lever is `BindTextures` (§7).
+- Implementation: its own memo `gb_memo` (it does not share a slot with `df_memo`), a new switch `BbToggle::GBufferFastPath` (bit 29 if it is free, §4.1; if not, bit 31),
+  a VERIFY that reproduces the effects, runs the full `BeginRendering` on top and compares a per-target snapshot + the `RenderState` byte for byte.
 
-## 1. Qué hace hoy un draw de G-buffer y qué cubre ya el camino de profundidad
+## 1. What a G-buffer draw does today and what the depth path already covers
 
-Orden en `Rasterizer::Draw` (`vk_rasterizer.cpp:1760-1877`; `DrawIndirect` `:1879-2102` repite la misma secuencia y llama a la misma `BeginRenderingFast`, `:1944`).
-Coste por draw de G-buffer, µs instrumentados [M] (`run-dftp.txt`, `run-depth-ph.txt`; ventanas con 11-12 k draws de G-buffer): `begin` 0.59-0.70, `prep` 0.11-0.14,
+Order in `Rasterizer::Draw` (`vk_rasterizer.cpp:1760-1877`; `DrawIndirect` `:1879-2102` repeats the same sequence and calls the same `BeginRenderingFast`, `:1944`).
+Cost per G-buffer draw, instrumented µs [M] (`run-dftp.txt`, `run-depth-ph.txt`; windows with 11-12 k G-buffer draws): `begin` 0.59-0.70, `prep` 0.11-0.14,
 `bbuf` 0.85-0.89, `btex` 0.94-1.16, `pipe` 0.25-0.29, `post` 0.19-0.23, total 3.44-3.79.
 
-| Paso | Dónde [C] | Camino de profundidad (hoy) | G-buffer (hoy) |
+| Step | Where [C] | Depth path (today) | G-buffer (today) |
 |---|---|---|---|
-| `PrepareRenderState`: memo `RtMemo` por series `rel_depth`/`rel_color`, `mrt_mask`, `ImageSetGeneration`, `gpu_modified_epoch` | `:892-1060`, hit `:913-922`; efectos del acierto (`GetImage`, `NoteFound`, `bound_images`, `is_target`) `:974-993` | cubierto | **cubierto** (`num_cb != 0` exige también `rel_color`, `:917-918`). Residuo: el bucle de `active_mask` (`:906-908`, 7 `GetMask`) se calcula también en el acierto aunque solo lo usa el fallo; el bucle de efectos toca 8 imágenes (~0.05-0.07 µs) |
-| Puerta a `BeginRenderingFast` | `:4002-4014` | memo `df_memo`, 90-93% de aciertos | **`mrt_mask != 0` -> `BeginRendering` completo** |
-| `BeginRendering` por destino de color: `GetImage` (toque LRU) + comprobación `needs_rebind` (re-búsqueda con `FindImage` que además **muta `cb_descs[cb].first` y `bound_images`**) | `:4137-4141` | n/a (sin color) | cada draw |
-| `UpdateImage` (`LockCounted`, `TrackImage`, `TouchImage`, `RefreshImage`) | `:4142`, `texture_cache.h:419-426` | `UpdateIsNoop` en el check | cada draw |
-| `runtime.SetBackingSamples(image, key.color_samples[cb])` | `:4144`, `vk_runtime.cpp:644-719` (sale al instante si `backing->num_samples` coincide) | n/a | cada draw; **depende de la clave del pipeline**, no de registros |
-| `FindRenderTarget(update=false)`: `MarkWritten` (flag `GpuModified`; con `MipTailMode()` busca solapes si aún no lo está), cola `download_images` si `readback_linear_images` y la imagen es lineal/<=8 px, `usage.render_target`, `surface_metas.emplace` de CMASK/FMASK (bump de `MetaEpoch` si inserta), `image.FindView(view_info, false)` | `:4146`, `texture_cache.cpp:896-940` | n/a | cada draw |
-| `TestAndTouchMeta(col_buf.CmaskAddress(), slice)` -> `is_clear` (consume el bit CMASK) | `:4155`, `texture_cache.h:522-531` | HTILE: memo con `MetaEpoch` | cada draw (una búsqueda hash por destino aunque `fast_clear` esté apagado, porque `CmaskAddress()` sale del registro: `image_info.cpp:77` solo pone `meta_info.cmask_addr` con `fast_clear`) |
-| Transición del destino a `ColorAttachmentOptimal` (`ColorAttachmentOutput`, `Write\|Read`, rango = `desc.view_info.range`) o, si `image->binding.is_bound`, a feedback-loop/`General` con `FlushBarriers()` previo y `attachment_feedback_loop = true` | `:4162-4181`, `vk_runtime.cpp:171-177`, `image.cpp:352-450` | `TransitIsNoop` (profundidad) | cada draw, un `Transit` por destino |
-| Tamaño/capas del `RenderState` (`min` con `image->info.size >> mip`, capas de la vista), `RenderAttachment` (vista, layout, `clear_value`, `is_clear`), `usage.render_target` | `:4184-4196` | memo | cada draw |
-| `TakeHudless`: si `cb == 0 && image->usage.vo_surface` fija `hudless_vo*` | `:4197-4202`, flag en `vk_presenter.h:92` | n/a | cada draw (efecto fuera del `RenderState`) |
-| Profundidad: `FindDepthTarget` (búsqueda del stencil por regiones + `AssociateDepth`, `surface_metas.emplace` HTILE), `TestAndTouchMeta` HTILE, `Transit` | `:4209-4281`, `texture_cache.cpp:942-990` | `DepthFastBeginCheck` (`:3915-3950`) | cada draw. En G-buffer pesa más que en solo profundidad: `begin split ... depth=0.13` [M] |
-| `scheduler.BeginRendering(state, token)` | `:1833`, `vk_scheduler.cpp:86-146` | token salta el `memcmp` de 296 bytes | token 0 siempre -> `memcmp` (schBegin 0.029 µs [M]) |
-| Estado dinámico (viewport, blend, `write_masks`, ...) | `CommitDynamicState` `:4544-4591` | memo por `RelDynamic` | **cubierto** (`dyn` 0.088 -> 0.034 µs ON/OLD en G-buffer [M]); no hay nada más que sacar |
-| Descriptores / bindings (`BindBuffers`, `BindTextures`, `Pipeline::BindResources`, `ResetBindings`) | `:3454-`, `:2833-2862` | sin cambios | sin cambios (ver §7) |
+| `PrepareRenderState`: `RtMemo` memo by the serials `rel_depth`/`rel_color`, `mrt_mask`, `ImageSetGeneration`, `gpu_modified_epoch` | `:892-1060`, hit `:913-922`; the hit's effects (`GetImage`, `NoteFound`, `bound_images`, `is_target`) `:974-993` | covered | **covered** (`num_cb != 0` also requires `rel_color`, `:917-918`). Residue: the `active_mask` loop (`:906-908`, 7 `GetMask`) is computed on the hit too although only the miss uses it; the effects loop touches 8 images (~0.05-0.07 µs) |
+| The gate to `BeginRenderingFast` | `:4002-4014` | memo `df_memo`, 90-93% hits | **`mrt_mask != 0` -> full `BeginRendering`** |
+| `BeginRendering` per colour target: `GetImage` (LRU touch) + the `needs_rebind` check (a new lookup with `FindImage` that also **mutates `cb_descs[cb].first` and `bound_images`**) | `:4137-4141` | n/a (no colour) | every draw |
+| `UpdateImage` (`LockCounted`, `TrackImage`, `TouchImage`, `RefreshImage`) | `:4142`, `texture_cache.h:419-426` | `UpdateIsNoop` in the check | every draw |
+| `runtime.SetBackingSamples(image, key.color_samples[cb])` | `:4144`, `vk_runtime.cpp:644-719` (returns at once if `backing->num_samples` matches) | n/a | every draw; **depends on the pipeline key**, not on registers |
+| `FindRenderTarget(update=false)`: `MarkWritten` (`GpuModified` flag; with `MipTailMode()` it looks for overlaps if it is not set yet), the `download_images` queue if `readback_linear_images` and the image is linear/<=8 px, `usage.render_target`, `surface_metas.emplace` of CMASK/FMASK (bumps `MetaEpoch` if it inserts), `image.FindView(view_info, false)` | `:4146`, `texture_cache.cpp:896-940` | n/a | every draw |
+| `TestAndTouchMeta(col_buf.CmaskAddress(), slice)` -> `is_clear` (consumes the CMASK bit) | `:4155`, `texture_cache.h:522-531` | HTILE: memo with `MetaEpoch` | every draw (a hash lookup per target even with `fast_clear` off, because `CmaskAddress()` comes from the register: `image_info.cpp:77` only sets `meta_info.cmask_addr` with `fast_clear`) |
+| The target's transition to `ColorAttachmentOptimal` (`ColorAttachmentOutput`, `Write\|Read`, range = `desc.view_info.range`) or, if `image->binding.is_bound`, to feedback-loop/`General` with a prior `FlushBarriers()` and `attachment_feedback_loop = true` | `:4162-4181`, `vk_runtime.cpp:171-177`, `image.cpp:352-450` | `TransitIsNoop` (depth) | every draw, one `Transit` per target |
+| The `RenderState`'s size/layers (`min` with `image->info.size >> mip`, the view's layers), `RenderAttachment` (view, layout, `clear_value`, `is_clear`), `usage.render_target` | `:4184-4196` | memo | every draw |
+| `TakeHudless`: if `cb == 0 && image->usage.vo_surface` it sets `hudless_vo*` | `:4197-4202`, flag in `vk_presenter.h:92` | n/a | every draw (an effect outside the `RenderState`) |
+| Depth: `FindDepthTarget` (stencil lookup by regions + `AssociateDepth`, `surface_metas.emplace` HTILE), `TestAndTouchMeta` HTILE, `Transit` | `:4209-4281`, `texture_cache.cpp:942-990` | `DepthFastBeginCheck` (`:3915-3950`) | every draw. In G-buffer it weighs more than in depth-only: `begin split ... depth=0.13` [M] |
+| `scheduler.BeginRendering(state, token)` | `:1833`, `vk_scheduler.cpp:86-146` | the token skips the 296-byte `memcmp` | token always 0 -> `memcmp` (schBegin 0.029 µs [M]) |
+| Dynamic state (viewport, blend, `write_masks`, ...) | `CommitDynamicState` `:4544-4591` | memo by `RelDynamic` | **covered** (`dyn` 0.088 -> 0.034 µs ON/OLD in G-buffer [M]); there is nothing more to take |
+| Descriptors / bindings (`BindBuffers`, `BindTextures`, `Pipeline::BindResources`, `ResetBindings`) | `:3454-`, `:2833-2862` | unchanged | unchanged (see §7) |
 
-Nota sobre cómo está medido `begin` [C]: `BeginRendering` lleva `DrawPhase::LapStart/Lap/Sub` (`vk_rasterizer.cpp:4114,4130,4143-4160,4183,4204,4214,4233,4287-4288`; `Now()` =
-`__builtin_ia32_rdtsc()`, `vk_rasterizer.h:36`). Por destino son **5 vueltas** (4143, 4145, 4147, 4160, 4183): con 7 destinos son 35 lecturas, más ~7 de la profundidad
-y los extremos: ~42 lecturas por draw. La vuelta `samples` (que solo mide `SetBackingSamples`, una salida inmediata) marca **0.07-0.12 µs por draw** en los dos logs [M]: eso es casi
-solo coste del reloj (~13 ns por lectura y destino).
+A note on how `begin` is measured [C]: `BeginRendering` carries `DrawPhase::LapStart/Lap/Sub` (`vk_rasterizer.cpp:4114,4130,4143-4160,4183,4204,4214,4233,4287-4288`; `Now()` =
+`__builtin_ia32_rdtsc()`, `vk_rasterizer.h:36`). Per target there are **5 laps** (4143, 4145, 4147, 4160, 4183): with 7 targets that is 35 reads, plus ~7 for the depth
+and the ends: ~42 reads per draw. The `samples` lap (which only measures `SetBackingSamples`, an immediate return) shows **0.07-0.12 µs per draw** in both logs [M]: that is almost
+only the clock's cost (~13 ns per read and target).
 
-## 2. Invariantes que hacen exacta la repetición del `RenderState` anterior
+## 2. Invariants that make repeating the previous `RenderState` exact
 
-`BeginRendering` (draw consecutivo de G-buffer, sin limpieza) es función de:
+`BeginRendering` (a consecutive G-buffer draw, without a clear) is a function of:
 
-| Entrada | Cómo se garantiza que no cambió | Qué la rompe |
+| Input | How it is guaranteed not to have changed | What breaks it |
 |---|---|---|
-| `key.mrt_mask`, `key.color_samples[cb]` (de la clave del pipeline: el pipeline cambia en ~20% de los draws, `pipe=80-83` [M]) | comparar `mrt_mask` y los 8 `u8` de `color_samples` con los del memo | mascara distinta entre pipelines del mismo tramo (conjuntos de MRT, ESCENA-TEMPLO §3: 4 conjuntos de 7): fallo `mask`, fallback completo |
-| `regs.color_buffers[cb]`, `color_target_mask`, extensiones de color (CmaskAddress, vista, formato) | serie `RelColor` igual (sube solo si un dword de la máscara cambia de **valor**, `liverpool.cpp:418-500`) | cambio de conjunto de MRT (unos 4 por frame) |
-| Registros de profundidad, `color_control` (modo `Disable`), `depth_render_control` (clear), `DB_DEPTH_CONTROL` bits 0-2, extensión de profundidad | serie `RelRender` igual (`DepthFastEnsureRelevance`, `:3844-3911`) | los 16 draws con escritura `GREATER` al inicio del G-buffer, PRE-Z tardíos |
-| Qué imagen es cada destino: `cb_descs[cb].first`, `db_desc.first` (y su `desc`) | `ImageSetGeneration` + `gpu_modified_epoch` (los de `RtMemo`) **y** comparar los ids con los del memo (otro `PrepareRenderState` fallido o un `mrt_mask` distinto reescribe `cb_descs`) | alta/baja de imágenes (streaming, gemelos profundidad/color: ~100 conversiones/s en mundo abierto, `texture_cache.cpp:350-413`); `needs_rebind` |
-| Estado de cada imagen: `Registered`, `GpuModified` (`MarkWritten` sin efecto), no `Dirty` y rastreada entera (`UpdateIsNoop`, `texture_cache.h:590-595`: `UpdateImage` solo toca el LRU), `num_samples <= 1`, sin `needs_rebind` | lectura de flags bajo `BatchLock` (el CP/handler de fallos modifica flags bajo el mismo mutex) | escritura de CPU sobre el destino (`CpuDirty`), pérdida de rastreo parcial, MSAA |
-| `backing` (vistas, layout, `SetBackingSamples`) | mismo puntero `backing` que al grabar (los `BackingImage` viven en un `std::deque`: direcciones estables; las listas de vistas solo crecen) | `SetBackingSamples` en otra operación (copias, subidas, resolve) |
-| `Transit` del destino sin barrera ni cambio de estado | `Image::TransitIsNoop(ColorAttachmentOptimal, Write\|Read, ColorAttachmentOutput, rango)` (`image.cpp:310-350`; más estricto que `GetBarriers`: compara también la etapa) | el destino fue muestreado/escrito por otra operación entre dos draws (barrera real); compute que escribe el destino |
-| Bit de limpieza CMASK/HTILE ya consumido, y que no se vuelva a poner | `MetaEpoch` igual (sube en `ClearMeta`, `TouchMeta(.., true)`, alta/baja de entradas: `texture_cache.h:538,550`, `.cpp:925,934,955,2241-2249,2307-2315`) | `ClearMeta` por dispatch/`FillBuffer` de metadatos (`vk_rasterizer.cpp:2900,4347`): <= decenas por frame |
-| `RenderAttachment::is_clear` / `depth_clear` / `stencil_clear` = falsos al grabar | solo se graba un memo cuyo estado no limpia (como `DepthFastRecord`, `:3967`); el estado del draw que limpia **no** es el del siguiente (el bit se consume) | primer draw tras una limpieza: no hay memo -> completo, y el siguiente graba |
-| `image->binding.is_bound` (muestreo del propio destino: bucle de realimentación) | se lee **en cada draw** (lo pone `BindTextures`, que corre antes, `:1805` frente a `:1813`); se exige `false` para todos los destinos | destino muestreado por el PS (SSR, lectura del buffer de profundidad como textura si es color-twin): el camino completo lo trata con `eAttachmentFeedbackLoopOptimalEXT` y `attachment_feedback_loop = true` |
-| `usage.vo_surface` del destino 0 (efecto `hudless_vo*`) | se exige falso al grabar y se vuelve a leer en cada acierto (un bit) | superficie del video out (draw de composición final): completo |
-| Efectos laterales: `download_images.emplace` (no idempotente en el tiempo: `ProcessDownloadImages` vacía el conjunto), `image.usage.render_target` | no grabar si `readback_linear_images && (!is_tiled \|\| width <= 8)`; el `usage` es un almacenamiento idempotente que se repite | destinos lineales con readback (no son los del G-buffer) |
+| `key.mrt_mask`, `key.color_samples[cb]` (from the pipeline key: the pipeline changes in ~20% of the draws, `pipe=80-83` [M]) | compare `mrt_mask` and the 8 `u8` of `color_samples` with the memo's | a different mask between pipelines of the same stretch (MRT sets, ESCENA-TEMPLO §3: 4 sets of 7): a `mask` miss, full fallback |
+| `regs.color_buffers[cb]`, `color_target_mask`, colour extensions (CmaskAddress, view, format) | the `RelColor` serial equal (it only goes up if a dword of the mask changes **value**, `liverpool.cpp:418-500`) | a change of MRT set (about 4 per frame) |
+| Depth registers, `color_control` (`Disable` mode), `depth_render_control` (clear), `DB_DEPTH_CONTROL` bits 0-2, the depth extension | the `RelRender` serial equal (`DepthFastEnsureRelevance`, `:3844-3911`) | the 16 draws with `GREATER` writes at the start of the G-buffer, late PRE-Z |
+| Which image each target is: `cb_descs[cb].first`, `db_desc.first` (and its `desc`) | `ImageSetGeneration` + `gpu_modified_epoch` (those of `RtMemo`) **and** comparing the ids with the memo's (another failed `PrepareRenderState` or a different `mrt_mask` rewrites `cb_descs`) | images added/removed (streaming, depth/colour twins: ~100 conversions/s in the open world, `texture_cache.cpp:350-413`); `needs_rebind` |
+| The state of each image: `Registered`, `GpuModified` (`MarkWritten` has no effect), not `Dirty` and tracked whole (`UpdateIsNoop`, `texture_cache.h:590-595`: `UpdateImage` only touches the LRU), `num_samples <= 1`, without `needs_rebind` | reading the flags under `BatchLock` (the CP/fault handler change flags under the same mutex) | a CPU write over the target (`CpuDirty`), losing partial tracking, MSAA |
+| `backing` (views, layout, `SetBackingSamples`) | the same `backing` pointer as when recorded (the `BackingImage`s live in a `std::deque`: stable addresses; the view lists only grow) | `SetBackingSamples` in another operation (copies, uploads, resolve) |
+| The target's `Transit` without a barrier or state change | `Image::TransitIsNoop(ColorAttachmentOptimal, Write\|Read, ColorAttachmentOutput, range)` (`image.cpp:310-350`; stricter than `GetBarriers`: it also compares the stage) | the target was sampled/written by another operation between two draws (a real barrier); compute that writes the target |
+| The CMASK/HTILE clear bit already consumed, and not set again | `MetaEpoch` equal (goes up in `ClearMeta`, `TouchMeta(.., true)`, entries added/removed: `texture_cache.h:538,550`, `.cpp:925,934,955,2241-2249,2307-2315`) | `ClearMeta` by a metadata dispatch/`FillBuffer` (`vk_rasterizer.cpp:2900,4347`): <= tens per frame |
+| `RenderAttachment::is_clear` / `depth_clear` / `stencil_clear` = false when recorded | only a memo whose state does not clear is recorded (like `DepthFastRecord`, `:3967`); the state of the draw that clears is **not** the next one's (the bit is consumed) | the first draw after a clear: there is no memo -> full, and the next one records |
+| `image->binding.is_bound` (sampling the target itself: a feedback loop) | read **in every draw** (set by `BindTextures`, which runs first, `:1805` against `:1813`); `false` is required for every target | a target sampled by the PS (SSR, reading the depth buffer as a texture if it is a colour twin): the full path handles it with `eAttachmentFeedbackLoopOptimalEXT` and `attachment_feedback_loop = true` |
+| `usage.vo_surface` of target 0 (the `hudless_vo*` effect) | required false when recorded and read again on every hit (one bit) | the video out surface (the final composite draw): full |
+| Side effects: `download_images.emplace` (not idempotent over time: `ProcessDownloadImages` empties the set), `image.usage.render_target` | do not record if `readback_linear_images && (!is_tiled \|\| width <= 8)`; the `usage` is an idempotent store that is repeated | linear targets with readback (not the G-buffer's) |
 
-Efectos que **sí** hay que repetir en cada acierto (los demás de `BeginRendering` son nulos con las condiciones de arriba): `attachment_feedback_loop = false`; toque LRU de cada imagen
-(`GetImage` y el de `UpdateImage` coinciden dentro del mismo `gc_tick`: `LeastRecentlyUsedCache::Touch` sale en cuanto `item.tick >= tick`, `lru_cache.h:35-39`, ~3-5 ns); `usage.render_target = 1` y
-`usage.depth_target = true`; toque de la imagen de stencil enlazada (`TouchLinked`, ya existe). `NoteFound`/`bound_images`/`is_target` los hace `PrepareRenderState` antes, no `BeginRendering`.
+Effects that **do** have to be repeated on every hit (the others of `BeginRendering` are null under the conditions above): `attachment_feedback_loop = false`; the LRU touch of each image
+(`GetImage` and `UpdateImage`'s coincide within the same `gc_tick`: `LeastRecentlyUsedCache::Touch` returns as soon as `item.tick >= tick`, `lru_cache.h:35-39`, ~3-5 ns); `usage.render_target = 1` and
+`usage.depth_target = true`; the touch of the linked stencil image (`TouchLinked`, already exists). `NoteFound`/`bound_images`/`is_target` are done by `PrepareRenderState` before, not `BeginRendering`.
 
-Casos que hacen incorrecto el memo si se olvidan (todos tienen comprobación arriba): primer draw tras una limpieza; destinos también muestreados (feedback); metadatos CMASK/FMASK que cambian por una limpieza rápida (`MetaEpoch`);
-`SetBackingSamples` con copia entre backings MSAA (cambia `backing`); imagen recreada por conversión profundidad/color (`ImageSetGeneration`); `needs_rebind` (el camino completo reasigna `cb_descs[cb].first`);
-`mrt_mask`/`color_samples` distintos con los mismos registros (clave del pipeline); destino 0 = superficie de video out (hudless).
+Cases that make the memo wrong if forgotten (all have a check above): the first draw after a clear; targets also sampled (feedback); CMASK/FMASK metadata that changes through a fast clear (`MetaEpoch`);
+`SetBackingSamples` with a copy between MSAA backings (`backing` changes); an image recreated by a depth/colour conversion (`ImageSetGeneration`); `needs_rebind` (the full path reassigns `cb_descs[cb].first`);
+a different `mrt_mask`/`color_samples` with the same registers (the pipeline key); target 0 = the video out surface (hudless).
 
-## 3. Qué es y qué no es repetible (decisión)
+## 3. What is and is not repeatable (decision)
 
-Todo lo anterior es comprobable con lecturas por destino, sin tocar tablas hash: la repetición es exacta cuando se cumplen (Registro, Imagen, Estado, Backing, Transit, Meta, Limpieza, is_bound, vo_surface). Lo que **no** se puede saltar sin
-cambiar el comportamiento: los toques LRU (efecto observable por la GC) y la lectura de flags de cada imagen (los cambia el CP y los fallos de CPU entre draws). Eso fija el coste mínimo de un acierto en ~20-25 ns por destino [E].
+Everything above can be checked with per-target reads, without touching hash tables: the repetition is exact when (Register, Image, State, Backing, Transit, Meta, Clear, is_bound, vo_surface) hold. What **cannot** be skipped without
+changing behaviour: the LRU touches (an effect observable by the GC) and reading each image's flags (the CP and CPU faults change them between draws). That sets a hit's minimum cost at ~20-25 ns per target [E].
 
-## 4. Plan de implementación (fase 2, a pedir después)
+## 4. Implementation plan (phase 2, to be requested later)
 
-### 4.1 Interruptor
+### 4.1 Switch
 
-`BbToggle::GBufferFastPath` (bit puesto = camino antiguo; **activo por defecto**: no entra en la máscara por defecto de `src/runtime_memory.c:1402`). Bit 29: `bbport_toggles.h` dice
-"los bits 20-29 se usan como interruptores de depuración crudos" (cámara/movimiento/upscaler); `grep` en `gpu/` y `src/` no encuentra ningún uso de `1<<29`, pero hay que repetir ese `grep` al empezar. Si hay duda, **bit 31**
-(`1u << 31`, libre; `UpdateImageFastPath` es 30). Además exige `DepthFastActive()` (hilo de dibujo + máscaras de relevancia construidas): sin el transporte por diferencias las series suben siempre. Honrado en vivo, leído por draw, como el bit 28.
+`BbToggle::GBufferFastPath` (bit set = old path; **active by default**: it is not in the default mask of `src/runtime_memory.c:1402`). Bit 29: `bbport_toggles.h` says
+"bits 20-29 are used as raw debug switches" (camera/motion/upscaler); `grep` in `gpu/` and `src/` finds no use of `1<<29`, but that `grep` has to be repeated when starting. If in doubt, **bit 31**
+(`1u << 31`, free; `UpdateImageFastPath` is 30). It also requires `DepthFastActive()` (the draw thread + the relevance masks built): without transport by differences the serials always go up. Honoured live, read per draw, like bit 28.
 
-### 4.2 Estructuras (`vk_rasterizer.h`)
+### 4.2 Structures (`vk_rasterizer.h`)
 
 ```
-struct GBufferFastMemo {            // un hueco, aparte de df_memo (no se pisan: DepthFastRecord invalida el suyo con color)
+struct GBufferFastMemo {            // one slot, separate from df_memo (they do not overwrite each other: DepthFastRecord invalidates its own with colour)
     bool valid{};
     u32 rel_render{}, rel_color{}, mrt_mask{};
-    std::array<u8, 8> samples{};                 // key.color_samples al grabar
+    std::array<u8, 8> samples{};                 // key.color_samples when recorded
     u64 image_generation{}, gpu_epoch{}, meta_epoch{};
-    struct Att { VideoCore::ImageId id{}; const void* backing{}; } color[8]; // id nulo = ranura vacía
-    DepthFastMemo depth;                         // db_id, stencil_id, backing, layout/access/stage/range (reutiliza campos y la comprobación)
+    struct Att { VideoCore::ImageId id{}; const void* backing{}; } color[8]; // null id = empty slot
+    DepthFastMemo depth;                         // db_id, stencil_id, backing, layout/access/stage/range (reuses fields and the check)
     u64 token{};
     RenderState state{};
 };
 ```
 
-### 4.3 Funciones
+### 4.3 Functions
 
-- `Rasterizer::BeginRenderingFast` (`:4002`): quitar la salida temprana de `mrt_mask != 0` **solo** si `GBufferFastPath` está activo; para `mrt_mask != 0` llamar a `GBufferFastCheck` / `Apply` / `Record`. Un único punto, lo usan `Draw` y `DrawIndirect`.
-- `u32 GBufferFastCheck(const GraphicsPipeline*)`: bajo `BatchLock`; causas (como `c.cause[]`): `nomemo`, `mask` (mrt_mask/muestras), `regs` (RelRender/RelColor), `ids` (`cb_descs[cb].first`/`db_desc.first`), `gen`, `gpuepoch`, `meta`, `flags` (Registered/GpuModified/needs_rebind/`UpdateIsNoop`), `bound` (`is_bound`), `vo` (`usage.vo_surface` del destino 0), `backing`, `transit` (color), `transit_depth`. Para la parte de profundidad, extraer de `DepthFastBeginCheck` (`:3915-3950`) una función `DepthSideCheck(const DepthFastMemo&)` y llamarla desde las dos (sin cambiar su comportamiento: el verify de profundidad ya tiene 0 discrepancias en 24.8 M).
-- `void GBufferFastApply()`: `attachment_feedback_loop = false`; por destino no vacío `GetImage(id)` + `usage.render_target = 1`; profundidad como `DepthFastBeginApply` (`:3955-3960`).
-- `void GBufferFastRecord(const RenderState&, const GraphicsPipeline*)`: tras un `BeginRendering` completo; grabar solo si: ningún `is_clear`/`depth_clear`/`stencil_clear`; `attachment_feedback_loop == false`; para cada imagen no vacía `!needs_rebind`, `Registered`, `GpuModified`, `UpdateIsNoop`, `num_samples <= 1`, sin readback lineal, `backing->num_samples == key.color_samples[cb]`; destino 0 sin `vo_surface`; los ids de `cb_descs` iguales a los usados (el camino completo puede haberlos reasignado); además la comprobación de `TransitIsNoop` actual (para no grabar un estado que acaba de generar una barrera). Si no, `valid = false` y contador `not-recorded` por causa.
-- El `Transit` de color no necesita campos propios: son constantes (`ColorAttachmentOptimal`, `ColorAttachmentOutput`, `Write|Read`) y el rango sale de `cb_descs[cb].second.view_info.range`, que no cambia mientras `cb_descs` y las series coincidan (misma suposición que `RtMemo`).
-- `Scheduler::BeginRendering(state, token)` ya sabe saltar el `memcmp` con el token (`vk_scheduler.cpp:86-99`): se pasa `gb_memo.token` (contador compartido `df_next_token`).
-- Micro-ajustes aparte (sin riesgo, ~0.03-0.05 µs/draw de G-buffer [E]): mover el bucle de `active_mask` de `PrepareRenderState` al camino de fallo (`:906-908`); y que el acierto de `PrepareRenderState` y `GBufferFastApply` no repitan `GetImage`+`NoteFound` sobre las mismas 8 imágenes (hoy: `:975-988` y luego `:4137`).
+- `Rasterizer::BeginRenderingFast` (`:4002`): remove the early return for `mrt_mask != 0` **only** if `GBufferFastPath` is active; for `mrt_mask != 0` call `GBufferFastCheck` / `Apply` / `Record`. A single point, used by `Draw` and `DrawIndirect`.
+- `u32 GBufferFastCheck(const GraphicsPipeline*)`: under `BatchLock`; causes (like `c.cause[]`): `nomemo`, `mask` (mrt_mask/samples), `regs` (RelRender/RelColor), `ids` (`cb_descs[cb].first`/`db_desc.first`), `gen`, `gpuepoch`, `meta`, `flags` (Registered/GpuModified/needs_rebind/`UpdateIsNoop`), `bound` (`is_bound`), `vo` (target 0's `usage.vo_surface`), `backing`, `transit` (colour), `transit_depth`. For the depth part, extract from `DepthFastBeginCheck` (`:3915-3950`) a function `DepthSideCheck(const DepthFastMemo&)` and call it from both (without changing its behaviour: the depth verify already has 0 mismatches in 24.8 M).
+- `void GBufferFastApply()`: `attachment_feedback_loop = false`; per non-empty target `GetImage(id)` + `usage.render_target = 1`; depth like `DepthFastBeginApply` (`:3955-3960`).
+- `void GBufferFastRecord(const RenderState&, const GraphicsPipeline*)`: after a full `BeginRendering`; record only if: no `is_clear`/`depth_clear`/`stencil_clear`; `attachment_feedback_loop == false`; for each non-empty image `!needs_rebind`, `Registered`, `GpuModified`, `UpdateIsNoop`, `num_samples <= 1`, no linear readback, `backing->num_samples == key.color_samples[cb]`; target 0 without `vo_surface`; the `cb_descs` ids equal to those used (the full path may have reassigned them); plus the current `TransitIsNoop` check (so as not to record a state that has just produced a barrier). Otherwise, `valid = false` and a `not-recorded` counter per cause.
+- The colour `Transit` needs no fields of its own: they are constants (`ColorAttachmentOptimal`, `ColorAttachmentOutput`, `Write|Read`) and the range comes from `cb_descs[cb].second.view_info.range`, which does not change while `cb_descs` and the serials match (the same assumption as `RtMemo`).
+- `Scheduler::BeginRendering(state, token)` already knows how to skip the `memcmp` with the token (`vk_scheduler.cpp:86-99`): `gb_memo.token` is passed (the shared counter `df_next_token`).
+- Separate micro-adjustments (no risk, ~0.03-0.05 µs per G-buffer draw [E]): move `PrepareRenderState`'s `active_mask` loop to the miss path (`:906-908`); and make `PrepareRenderState`'s hit and `GBufferFastApply` not repeat `GetImage`+`NoteFound` over the same 8 images (today: `:975-988` and then `:4137`).
 
-### 4.4 VERIFY (`SOTC_DEPTHFAST_VERIFY=1`, mismo mecanismo; o `SOTC_GBFAST_VERIFY=1`)
+### 4.4 VERIFY (`SOTC_DEPTHFAST_VERIFY=1`, the same mechanism; or `SOTC_GBFAST_VERIFY=1`)
 
-Igual que `:4034-4106`: en cada acierto, `GBufferFastApply`; instantánea; `BeginRendering` **completo** encima; instantánea; exigir (a) `RenderState` byte a byte igual al del memo, (b) instantánea idéntica, (c) ningún
-barrier nuevo (`runtime.PendingImageBarriers()`), usar el resultado del camino completo. La instantánea se amplía por destino (array de 8 + profundidad): `flags`, `usage`, `binding`, `backing`, layout/acceso/etapa, `subresource_states.size()`,
-`track_addr/_end`, tick LRU, `tick_accessed_last`; máscara CMASK del destino (`MetaClearMask(CmaskAddress)`) y HTILE; más globales: `attachment_feedback_loop`, `needs_barrier`, `bound_images.size()`, ids de `cb_descs`, `hudless_vo` (el camino completo no debe fijarlo: así se comprueba la exclusión de `vo_surface`),
-`LruTickOf` de las imágenes. Cualquier diferencia se cuenta e imprime (primeras 20); contadores acumulados en la línea `SOTC DEPTHFAST` (añadir `gb cand/hit/cause[]`).
-Límites (como en DEPTH-FASTPATH §5): no verifica los bytes de los thunks del recorder (son función de `RenderState`, descriptores, etc.); un campo del `RenderState` fuera del `memcmp` no se vería, pero `RenderState` se compara entero y sin padding (`static_assert has_unique_object_representations`).
-Criterio de aceptación del VERIFY: replay del templo + Santuario con >= 20 M de aciertos de G-buffer comprobados y 0 discrepancias.
+Like `:4034-4106`: on every hit, `GBufferFastApply`; snapshot; the **full** `BeginRendering` on top; snapshot; require (a) a `RenderState` byte for byte equal to the memo's, (b) an identical snapshot, (c) no
+new barrier (`runtime.PendingImageBarriers()`), use the full path's result. The snapshot is widened per target (an array of 8 + depth): `flags`, `usage`, `binding`, `backing`, layout/access/stage, `subresource_states.size()`,
+`track_addr/_end`, LRU tick, `tick_accessed_last`; the target's CMASK mask (`MetaClearMask(CmaskAddress)`) and HTILE; plus globals: `attachment_feedback_loop`, `needs_barrier`, `bound_images.size()`, the `cb_descs` ids, `hudless_vo` (the full path must not set it: that checks the `vo_surface` exclusion),
+the images' `LruTickOf`. Any difference is counted and printed (the first 20); accumulated counters in the `SOTC DEPTHFAST` line (add `gb cand/hit/cause[]`).
+Limits (as in DEPTH-FASTPATH §5): it does not verify the bytes of the recorder's thunks (they are a function of `RenderState`, descriptors, etc.); a `RenderState` field outside the `memcmp` would not be seen, but `RenderState` is compared whole and without padding (`static_assert has_unique_object_representations`).
+VERIFY's acceptance criterion: a replay of the temple + Shrine with >= 20 M G-buffer hits checked and 0 mismatches.
 
-### 4.5 Medición y lanzamientos (presupuesto sugerido: 8)
+### 4.5 Measurement and launches (suggested budget: 8)
 
-1. **Calibración + modo "solo contar"** (1 lanzamiento): compilar con un interruptor diagnóstico `SOTC_DRAW_LAPS=0` que quite las vueltas de `BeginRendering` (`Lap`/`LapStart`; quedan los `Mark`) y con `GBufferFastCheck` ejecutándose sin aplicar (estadística de causas). Dice: `begin` real de G-buffer, y la tasa de acierto real por causa. **Criterio de seguir: `begin` real >= 0.35 µs y acierto >= 90%.**
-2. VERIFY del templo (+ Santuario en reposo al inicio): 1-2 lanzamientos.
-3. A/B en la misma binaria con el bit alternando cada 5 s, ABBA y BAAB, templo y Santuario (`out/depth_ab.sh`, `out/depth_ab_temple.sh`): 4 lanzamientos. 1 lanzamiento de fases (`SOTC_DRAW_PHASES=1` con laps apagadas) para la tabla por fase ON/OLD.
-4. `tools/pgo_train.sh` antes de empaquetar (las funciones nuevas no tienen perfil).
+1. **Calibration + "count only" mode** (1 launch): build with a diagnostic switch `SOTC_DRAW_LAPS=0` that removes `BeginRendering`'s laps (`Lap`/`LapStart`; the `Mark`s stay) and with `GBufferFastCheck` running without applying (cause statistics). It tells: the G-buffer's real `begin`, and the real hit rate by cause. **Criterion to continue: real `begin` >= 0.35 µs and hits >= 90%.**
+2. VERIFY of the temple (+ the idle Shrine at the start): 1-2 launches.
+3. A/B on the same binary with the bit alternating every 5 s, ABBA and BAAB, temple and Shrine (`out/depth_ab.sh`, `out/depth_ab_temple.sh`): 4 launches. 1 phases launch (`SOTC_DRAW_PHASES=1` with laps off) for the ON/OLD table by phase.
+4. `tools/pgo_train.sh` before packaging (the new functions have no profile).
 
-## 5. Tasa de acierto y ahorro esperados
+## 5. Expected hit rate and saving
 
-**Acierto [E]**: 93-98% de los draws de G-buffer. Base: `rstate=100%` frente al draw anterior; `PrepareRenderState` 99.3% [M]; el camino de profundidad ve `regs` 0.8-1.3%, `gen` 0.01%, `meta` 0%, `flags`/`backing` 0% y `transit` 6-8% (solo por los draws DEPTH-RO). Fallos esperables en el G-buffer: primer draw de cada tramo tras limpieza (~10-20 por frame), cambio de conjunto de MRT/`mrt_mask` entre pipelines (**desconocido, es el principal riesgo del acierto**: hoy `RtMemo` es de un solo hueco y falla con otra `mrt_mask`), la profundidad de los draws que además la muestrean (barrera real por draw, el mismo 6-8% del DEPTH-RO), `ClearMeta`s.
+**Hits [E]**: 93-98% of the G-buffer draws. Basis: `rstate=100%` against the previous draw; `PrepareRenderState` 99.3% [M]; the depth path sees `regs` 0.8-1.3%, `gen` 0.01%, `meta` 0%, `flags`/`backing` 0% and `transit` 6-8% (only from the DEPTH-RO draws). Expected misses in the G-buffer: the first draw of each stretch after a clear (~10-20 per frame), a change of MRT set/`mrt_mask` between pipelines (**unknown, it is the main risk to the hit rate**: today `RtMemo` has a single slot and misses with another `mrt_mask`), the depth of the draws that also sample it (a real barrier per draw, the same 6-8% as DEPTH-RO), `ClearMeta`s.
 
-**Coste** [E, por draw de G-buffer, 7 destinos + profundidad]:
+**Cost** [E, per G-buffer draw, 7 targets + depth]:
 
 | | µs |
 |---|---:|
-| `BeginRendering` completo, instrumentado [M] | 0.59-0.70 |
-| menos ~42 lecturas de `rdtsc` (~8-14 ns cada una; la vuelta `samples` = solo reloj marca 0.07-0.12 µs [M]) | -0.15 a -0.40 |
-| **`BeginRendering` completo, real** | **0.30-0.55** |
-| repetición por acierto: `BatchLock` 0.009 + 7 x 20-25 ns + profundidad 0.04 + efectos 0.01 (anclado en el acierto de solo profundidad: 0.079 µs instrumentado, ~0.06 real, con 1 destino) | 0.20-0.25 |
-| `scheduler.BeginRendering` con token (evita `memcmp` de 296 B) | -0.01 |
-| **ahorro neto por acierto** | **0.10-0.35, central ~0.2** |
+| full `BeginRendering`, instrumented [M] | 0.59-0.70 |
+| minus ~42 `rdtsc` reads (~8-14 ns each; the `samples` lap = clock only shows 0.07-0.12 µs [M]) | -0.15 to -0.40 |
+| **full `BeginRendering`, real** | **0.30-0.55** |
+| repetition per hit: `BatchLock` 0.009 + 7 x 20-25 ns + depth 0.04 + effects 0.01 (anchored on the depth-only hit: 0.079 µs instrumented, ~0.06 real, with 1 target) | 0.20-0.25 |
+| `scheduler.BeginRendering` with a token (avoids the 296 B `memcmp`) | -0.01 |
+| **net saving per hit** | **0.10-0.35, central ~0.2** |
 
-Por frame (templo pesado, 2465 draws de G-buffer, acierto 95%): **0.25-0.8 ms, central ~0.5 ms/frame (~+1.2 FPS a 47 FPS, ~2.5% del frame)**, más 0.07-0.12 ms de los micro-ajustes de §4.3. El techo de 1.7 ms de
-DEPTH-FASTPATH §8 es la cifra instrumentada con repetición gratis: no es alcanzable. En el borde del criterio de aceptación del proyecto (>= 0.5 ms/frame o >= 2% de FPS); por eso el paso 0 de §4.5 es obligatorio.
+Per frame (heavy temple, 2465 G-buffer draws, 95% hits): **0.25-0.8 ms, central ~0.5 ms/frame (~+1.2 FPS at 47 FPS, ~2.5% of the frame)**, plus 0.07-0.12 ms from §4.3's micro-adjustments. The 1.7 ms ceiling of
+DEPTH-FASTPATH §8 is the instrumented figure with a free repetition: it cannot be reached. At the edge of the project's acceptance criterion (>= 0.5 ms/frame or >= 2% FPS); that is why §4.5's step 0 is mandatory.
 
-## 6. Riesgos
+## 6. Risks
 
-1. **Beneficio menor que el esperado** (arriba). Mitigación: calibración antes de escribir la repetición.
-2. **Efecto olvidado** en la repetición: lo cubre el VERIFY (instantánea ampliada), pero un efecto fuera de la instantánea no se vería: `download_images` (solo con `readback_linear_images`, excluido al grabar), `hudless_*` (excluido y comprobado), `bound_images`/`cb_descs` (en la instantánea).
-3. **Memo de un solo hueco con `mrt_mask` alternante**: si los draws de un tramo alternan 2-3 máscaras, tanto `RtMemo` como `gb_memo` fallan siempre. Contador `mask` en el paso 0; si pasa, ampliar a 2-4 huecos por `mrt_mask` (el `RtMemo` también).
-4. **Transit solo de etapa**: `GetBarriers` no actualiza `pl_stage` cuando no emite barrera (`image.cpp:429-431`) y `TransitIsNoop` la compara: una imagen con layout/acceso correctos pero otra etapa fallaría siempre sin barrera real. Contar `transit` aparte para destinos y revisar al ver las causas.
-5. **Imágenes con `Image*` inestables**: no se guardan punteros de `Image` (el `SlotVector` se mueve al insertar); solo ids y `backing` (estable). No introducir un caché de `Image*` sin validar contra `ImageSetGeneration`.
-6. **Concurrencia**: los flags los cambia el CP/handler de fallos bajo el mutex de `TextureCache`; las lecturas del check van bajo `BatchLock`, igual que el camino de profundidad. No leer flags fuera del bloqueo.
-7. **Contaminación entre memos**: `df_memo` y `gb_memo` separados; `RtMemo` es compartido (ya lo estaba). No cambiar `DepthFastRecord` (invalida con color: solo se llama con `mrt_mask == 0`).
-8. **PGO**: las funciones nuevas no tienen perfil (`tools/pgo_train.sh`). El caché de shaders no cambia.
-9. **Alcance**: la misma puerta aceptará draws de clase "otros" (color sin MRT 4, ~200 por ventana); no acertarán (`begTrans` 1.6-1.9 µs: barreras reales) y no deben empeorar: si el check falla, el coste extra es el del check (~0.03 µs).
+1. **A smaller benefit than expected** (above). Mitigation: calibrate before writing the repetition.
+2. **A forgotten effect** in the repetition: VERIFY covers it (the widened snapshot), but an effect outside the snapshot would not be seen: `download_images` (only with `readback_linear_images`, excluded when recording), `hudless_*` (excluded and checked), `bound_images`/`cb_descs` (in the snapshot).
+3. **A single-slot memo with an alternating `mrt_mask`**: if a stretch's draws alternate 2-3 masks, both `RtMemo` and `gb_memo` always miss. The `mask` counter in step 0; if it happens, widen to 2-4 slots per `mrt_mask` (`RtMemo` too).
+4. **A stage-only Transit**: `GetBarriers` does not update `pl_stage` when it emits no barrier (`image.cpp:429-431`) and `TransitIsNoop` compares it: an image with the right layout/access but another stage would always miss without a real barrier. Count `transit` separately for targets and review when looking at the causes.
+5. **Unstable `Image*`s**: no `Image` pointers are kept (the `SlotVector` moves on insert); only ids and `backing` (stable). Do not introduce an `Image*` cache without validating against `ImageSetGeneration`.
+6. **Concurrency**: the flags are changed by the CP/fault handler under the `TextureCache` mutex; the check's reads go under `BatchLock`, like the depth path. Do not read flags outside the lock.
+7. **Contamination between memos**: `df_memo` and `gb_memo` separate; `RtMemo` is shared (it already was). Do not change `DepthFastRecord` (it invalidates with colour: it is only called with `mrt_mask == 0`).
+8. **PGO**: the new functions have no profile (`tools/pgo_train.sh`). The shader cache does not change.
+9. **Scope**: the same gate will accept draws of the "other" class (colour without MRT 4, ~200 per window); they will not hit (`begTrans` 1.6-1.9 µs: real barriers) and must not get worse: if the check misses, the extra cost is the check's (~0.03 µs).
 
-## 7. Otros costes por draw de G-buffer, mayores que `BeginRendering` (evidencia)
+## 7. Other per-G-buffer-draw costs, larger than `BeginRendering` (evidence)
 
-Todos [M] en µs instrumentados por draw de G-buffer (`run-dftp.txt` / `run-depth-ph.txt`) con la causa [C]:
+All [M] in instrumented µs per G-buffer draw (`run-dftp.txt` / `run-depth-ph.txt`) with the cause [C]:
 
-| Coste | µs | Evidencia de código | Veredicto |
+| Cost | µs | Code evidence | Verdict |
 |---|---:|---|---|
-| `BindTextures` (VS + PS; ~11 imágenes + muestreadores, 22-24 escrituras de descriptor por draw) | **0.94-1.16** | `ReplayTexBindMemo` (`:3387-3452`) acierta 86%, pero por imagen aún ejecuta `BindResolvedImage` (`:3321-3366`): `FindTexture` -> `UpdateImage` (bloqueo + `TrackImage` + `TouchImage` + `RefreshImage`) + `FindView` + `Transit` + `image_infos.emplace_back`; y por muestreador `GetSampler` (`:3786-3829`). Es **la misma maquinaria por imagen** que `BeginRendering` por destino, con más imágenes (11 frente a 7) | **Candidato mayor y del mismo tipo**: `UpdateIsNoop && TransitIsNoop(ShaderReadOnlyOptimal, ShaderRead, AllCommands, rango)` + vista memoizada por `(backing, view_info)` en `TexBindMemoBinding`. [E] 0.2-0.4 µs/draw de G-buffer (0.5-1.0 ms/frame). Exactitud más delicada: los descriptores llevan el layout que deja `Transit`, y las imágenes muestreadas que son destino (`is_target`) usan feedback loop. Merece su propio documento |
-| `BindBuffers` (11 buffers) | **0.85-0.89** (`bbObt` 0.46-0.58, `bbClamp` 0.16-0.19, `bbDesc` 0.14-0.17, `bbFlat` 0.09-0.11) | `ObtainBuffer` x ~11, recorte de rango y descriptor por buffer | **No** (DEPTH-FASTPATH §3: direcciones nuevas en cada draw; un memo por (dirección, tamaño) ya midió cero ganancia) |
-| `Pipeline::BindResources` (`pipeDesc` 0.16-0.21, `pipePush` 0.05-0.06) | 0.25-0.29 | `pushDescriptorSetKHR` con 22-24 escrituras, descriptores iguales 0% | No sin cambiar los comandos grabados |
-| `ResetBindings` + `FlushPeriodic` (`postReset` 0.165-0.20) | 0.19-0.23 | `:2833-2862`: `binding = {}` por cada imagen de `bound_images` (~8 destinos + ~11 muestreadas), `AccessBuffer` por buffer (~11, memoizado por época `vk_runtime.cpp:731-751`) y por lectura fija | Solo el `binding = {}` de los destinos podría saltarse, pero `is_target` persistente cambiaría el comportamiento entre draws (`ResolveOverlap` y copias lo leen, `texture_cache.cpp:660,2181`): **no** exacto |
-| `PrepareRenderState` acierto | 0.11-0.14 | bucle de 8 imágenes (`:975-988`) + `active_mask` (`:906-908`) | Parcialmente: micro-ajustes de §4.3 (~0.03-0.05) |
+| `BindTextures` (VS + PS; ~11 images + samplers, 22-24 descriptor writes per draw) | **0.94-1.16** | `ReplayTexBindMemo` (`:3387-3452`) hits 86%, but per image it still runs `BindResolvedImage` (`:3321-3366`): `FindTexture` -> `UpdateImage` (lock + `TrackImage` + `TouchImage` + `RefreshImage`) + `FindView` + `Transit` + `image_infos.emplace_back`; and per sampler `GetSampler` (`:3786-3829`). It is **the same per-image machinery** as `BeginRendering` per target, with more images (11 against 7) | **A larger candidate of the same kind**: `UpdateIsNoop && TransitIsNoop(ShaderReadOnlyOptimal, ShaderRead, AllCommands, range)` + a view memoised by `(backing, view_info)` in `TexBindMemoBinding`. [E] 0.2-0.4 µs per G-buffer draw (0.5-1.0 ms/frame). Exactness is more delicate: the descriptors carry the layout `Transit` leaves, and sampled images that are targets (`is_target`) use a feedback loop. Deserves its own document |
+| `BindBuffers` (11 buffers) | **0.85-0.89** (`bbObt` 0.46-0.58, `bbClamp` 0.16-0.19, `bbDesc` 0.14-0.17, `bbFlat` 0.09-0.11) | `ObtainBuffer` x ~11, a range clamp and a descriptor per buffer | **No** (DEPTH-FASTPATH §3: new addresses in every draw; a memo by (address, size) already measured zero gain) |
+| `Pipeline::BindResources` (`pipeDesc` 0.16-0.21, `pipePush` 0.05-0.06) | 0.25-0.29 | `pushDescriptorSetKHR` with 22-24 writes, equal descriptors 0% | Not without changing the recorded commands |
+| `ResetBindings` + `FlushPeriodic` (`postReset` 0.165-0.20) | 0.19-0.23 | `:2833-2862`: `binding = {}` for each image in `bound_images` (~8 targets + ~11 sampled), `AccessBuffer` per buffer (~11, memoised by epoch `vk_runtime.cpp:731-751`) and per fixed read | Only the targets' `binding = {}` could be skipped, but a persistent `is_target` would change behaviour between draws (`ResolveOverlap` and copies read it, `texture_cache.cpp:660,2181`): **not** exact |
+| `PrepareRenderState` hit | 0.11-0.14 | the loop over 8 images (`:975-988`) + `active_mask` (`:906-908`) | Partly: §4.3's micro-adjustments (~0.03-0.05) |
 
-`BeginRendering` (0.59-0.70 instrumentado, 0.30-0.55 estimado real) está al nivel de `pipe` y por debajo de `bbuf`/`btex`; **`BindTextures` es el único coste mayor que `BeginRendering` donde el trabajo por imagen es memoizable con las mismas
-herramientas** (`UpdateIsNoop`, `TransitIsNoop`, series de generación/época).
+`BeginRendering` (0.59-0.70 instrumented, 0.30-0.55 estimated real) is at the level of `pipe` and below `bbuf`/`btex`; **`BindTextures` is the only cost larger than `BeginRendering` where the per-image work can be memoised with the same
+tools** (`UpdateIsNoop`, `TransitIsNoop`, generation/epoch serials).
 
-## 8. Orden recomendado
+## 8. Recommended order
 
-1. Paso 0 de §4.5 (calibración + estadística de causas, 1 lanzamiento, sin cambiar comportamiento).
-2. Si `begin` real >= 0.35 µs y acierto >= 90%: implementar §4 (`GBufferFastPath`) con VERIFY; A/B.
-3. Con las mismas piezas (`UpdateIsNoop`, `TransitIsNoop`): evaluar `BindTextures` (§7) con el mismo método (modo "solo contar" primero).
+1. §4.5's step 0 (calibration + cause statistics, 1 launch, without changing behaviour).
+2. If the real `begin` >= 0.35 µs and hits >= 90%: implement §4 (`GBufferFastPath`) with VERIFY; A/B.
+3. With the same pieces (`UpdateIsNoop`, `TransitIsNoop`): evaluate `BindTextures` (§7) with the same method ("count only" mode first).
 
-## 9. Resultados medidos (2026-10-26, binaria `out/bb-probe.gbfast.exe`, 6 lanzamientos de 10)
+## 9. Measured results (2026-10-26, binary `out/bb-probe.gbfast.exe`, 6 launches of 10)
 
-Aviso: la estimación de §5 era pesimista. Quitadas las vueltas (`SOTC_DRAW_LAPS=0`), `BeginRendering` de G-buffer cuesta **0.52 µs reales** (no 0.30-0.45): la mayor parte de los 0.60-0.70 instrumentados era trabajo real. Se llegó a implementar y medir todo (la coordinación pidió después parar en el paso 0 y portar a la rama nueva; el código queda en el árbol, compila, y está **activo por defecto**).
+Note: §5's estimate was pessimistic. With the laps removed (`SOTC_DRAW_LAPS=0`), the G-buffer's `BeginRendering` costs **0.52 real µs** (not 0.30-0.45): most of the 0.60-0.70 instrumented was real work. Everything was implemented and measured (coordination later asked to stop at step 0 and port to the new branch; the code stays in the tree, builds, and is **active by default**).
 
-**Paso 0 (`gbs0`, ABBA, `SOTC_DRAW_PHASES=1 SOTC_DRAW_LAPS=0`, modo `SOTC_GBFAST_MODE=count` y `SOTC_BTFAST_MODE=count`, ventanas >= 5000 cmds/frame, G-buffer, µs/draw):**
+**Step 0 (`gbs0`, ABBA, `SOTC_DRAW_PHASES=1 SOTC_DRAW_LAPS=0`, modes `SOTC_GBFAST_MODE=count` and `SOTC_BTFAST_MODE=count`, windows >= 5000 cmds/frame, G-buffer, µs/draw):**
 
-| | bit 29 puesto (camino antiguo) | bit 29 limpio (cuenta: check + completo) |
+| | bit 29 set (old path) | bit 29 clear (count: check + full) |
 |---|---:|---:|
-| `begin` | **0.521** | 0.600 (el check cuesta +0.079) |
-| `btex` (BindTextures, ~11 imágenes, 2 etapas) | **1.147** | 1.196 |
-| `btex` -> `s_btMemo` (hash + memo + `BindResolvedImage` por imagen) / `s_btImages` | 0.796 / 0.240 | 0.812 / 0.272 |
+| `begin` | **0.521** | 0.600 (the check costs +0.079) |
+| `btex` (BindTextures, ~11 images, 2 stages) | **1.147** | 1.196 |
+| `btex` -> `s_btMemo` (hash + memo + `BindResolvedImage` per image) / `s_btImages` | 0.796 / 0.240 | 0.812 / 0.272 |
 | total | 3.461 | 3.626 |
 
-Acierto del G-buffer por el check: **97.6%** (`cand 124703 hit 121660`; fallos: `mask` 1.2%, `nomemo` 0.4%, `regs` 0.6%, `dtransit` 0.15%, `gen` 0.03%; `ids/gpuepoch/meta/flags/bound/backing/transit/vo` 0). `state-differs 0`: en cada acierto el `BeginRendering` completo dio el `RenderState` del memo. BindTextures: 99.9% de 3.5 M bindings memoizados cumplen las condiciones (todos los fallos son `transit`). Puerta del paso 0 (begin real >= 0.35 µs, acierto >= 90%): cumplida; `btex` real 1.15 >= 0.6: cumplida.
+The G-buffer hit rate through the check: **97.6%** (`cand 124703 hit 121660`; misses: `mask` 1.2%, `nomemo` 0.4%, `regs` 0.6%, `dtransit` 0.15%, `gen` 0.03%; `ids/gpuepoch/meta/flags/bound/backing/transit/vo` 0). `state-differs 0`: on every hit the full `BeginRendering` gave the memo's `RenderState`. BindTextures: 99.9% of 3.5 M memoised bindings meet the conditions (all the misses are `transit`). Step 0's gate (real begin >= 0.35 µs, hits >= 90%): met; real `btex` 1.15 >= 0.6: met.
 
-**Implementado** (bits: `GBufferFastPath` = 29, `TexBindFastPath` = 31; bit puesto = camino antiguo; la máscara por defecto de `src/runtime_memory.c` no los incluye -> activos). Bit 29 comprobado libre: ningún uso en `gpu/`, `src/`, `launcher/`, `sotc.py` ni scripts (el comentario de "bits 20-29 de depuración" es histórico de bbport). El bit 31 también.
-- `GBufferFast`/`Check`/`Record`/`Apply` (`vk_rasterizer.cpp`, antes de `BeginRenderingFast`) con `gb_memo` propio; token del scheduler; contadores y línea `SOTC GBFAST`.
-- `TexBindFastCheck/Apply` dentro de `ReplayTexBindMemo`: solo sustituye `BindResolvedImage` (UpdateImage + FindView + Transit) por la vista y layout recordados cuando la imagen no está Dirty, tiene el mismo `backing`, `TransitIsNoop(ShaderReadOnly/DepthStencilReadOnly, ShaderRead, AllCommands)` y no es destino/General. `SotcLod::Mark` por T# se hace en el bucle anterior, que no se toca: la secuencia de marcas es idéntica a la lenta.
-- Diagnóstico: `SOTC_DRAW_LAPS=0` (quita las vueltas de `BeginRendering`), subfases `btMemo`/`btImages`, `SOTC_GBFAST_MODE=count`, `SOTC_BTFAST_MODE=count`.
+**Implemented** (bits: `GBufferFastPath` = 29, `TexBindFastPath` = 31; bit set = old path; the default mask in `src/runtime_memory.c` does not include them -> active). Bit 29 checked free: no use in `gpu/`, `src/`, `launcher/`, `sotc.py` nor scripts (the "debug bits 20-29" comment is historical, from bbport). Bit 31 too.
+- `GBufferFast`/`Check`/`Record`/`Apply` (`vk_rasterizer.cpp`, before `BeginRenderingFast`) with its own `gb_memo`; the scheduler's token; counters and a `SOTC GBFAST` line.
+- `TexBindFastCheck/Apply` inside `ReplayTexBindMemo`: it only replaces `BindResolvedImage` (UpdateImage + FindView + Transit) with the remembered view and layout when the image is not Dirty, has the same `backing`, `TransitIsNoop(ShaderReadOnly/DepthStencilReadOnly, ShaderRead, AllCommands)` and is not a target/General. `SotcLod::Mark` per T# is done in the loop before, which is not touched: the sequence of marks is identical to the slow one's.
+- Diagnostics: `SOTC_DRAW_LAPS=0` (removes `BeginRendering`'s laps), the subphases `btMemo`/`btImages`, `SOTC_GBFAST_MODE=count`, `SOTC_BTFAST_MODE=count`.
 
-**VERIFY** (`gbv1`, replay del templo, `SOTC_DEPTHFAST_VERIFY=1`): `BeginRendering` de G-buffer **13.04 M comprobaciones, 0 discrepancias**; texturas **134.5 M, 0**; profundidad (ya existente) 25.0 M, 0; `PrepareRenderState` 40.3 M, 0; estado dinámico 34.1 M, 0.
+**VERIFY** (`gbv1`, temple replay, `SOTC_DEPTHFAST_VERIFY=1`): the G-buffer's `BeginRendering` **13.04 M checks, 0 mismatches**; textures **134.5 M, 0**; depth (already existing) 25.0 M, 0; `PrepareRenderState` 40.3 M, 0; dynamic state 34.1 M, 0.
 
-**A/B en caliente** (misma binaria, `BB_TOGGLE_FILE` cada 5 s, ABBA + BAAB agrupados, vecinos de >= 5000 cmds/frame, desde 70 s; `gba1/gba2` bit 29, `gbb1/gbb2` bit 31):
+**A/B warm** (the same binary, `BB_TOGGLE_FILE` every 5 s, ABBA + BAAB grouped, neighbours of >= 5000 cmds/frame, from 70 s; `gba1/gba2` bit 29, `gbb1/gbb2` bit 31):
 
-| Cambio | `draw busy` ON-OLD | por 1000 cmds | FPS ON-OLD | tramo pesado (>= 7000 cmds) |
+| Change | `draw busy` ON-OLD | per 1000 cmds | FPS ON-OLD | heavy stretch (>= 7000 cmds) |
 |---|---|---|---|---|
 | `GBufferFastPath` (29) | **-1.06 ± 0.41 ms/frame** (n=20) | -0.120 ± 0.047 ms | **+2.57 ± 0.83** | -0.72 ± 0.27 ms/frame, +1.42 FPS (n=5) |
 | `TexBindFastPath` (31) | -0.70 ± 0.42 ms/frame (n=20) | -0.055 ± 0.068 ms | +1.48 ± 0.94 | -0.46 ± 0.18 ms/frame, +0.67 FPS (n=3) |
 
-El criterio (>= 0.5 ms/frame en el tramo pesado del templo o >= 2% de FPS en el Santuario) se cumple para el bit 29 (-0.72 ± 0.27 ms) y queda al borde para el 31 (-0.46 ± 0.18, n=3, ruido alto). No se midió el Santuario. Archivos tocados: `gpu/shim/bbport_toggles.h`, `gpu/shadps4/video_core/texture_cache/texture_cache.h` (`RenderTargetReplayable`), `gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.h/.cpp`; scripts `out/gb_bench_temple.sh`, `out/gb_ab_temple.sh`, `out/_gb_chain.sh`.
+The criterion (>= 0.5 ms/frame in the temple's heavy stretch or >= 2% FPS at the Shrine) is met for bit 29 (-0.72 ± 0.27 ms) and is at the edge for 31 (-0.46 ± 0.18, n=3, high noise). The Shrine was not measured. Files touched: `gpu/shim/bbport_toggles.h`, `gpu/shadps4/video_core/texture_cache/texture_cache.h` (`RenderTargetReplayable`), `gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.h/.cpp`; scripts `out/gb_bench_temple.sh`, `out/gb_ab_temple.sh`, `out/_gb_chain.sh`.

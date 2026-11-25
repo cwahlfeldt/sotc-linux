@@ -1,166 +1,169 @@
-# Shadow of the Colossus — PC (port nativo)
+# Shadow of the Colossus — PC (native port)
 
-Port nativo do **Shadow of the Colossus** de PS4 (CUSA08809, versão EU 1.01, ou CUSA08034,
-versão US 1.00) para **Linux**.
-O código do jogo roda direto na CPU. Isto não é um emulador completo: há um carregador e as
-funções de sistema de que o jogo precisa. A GPU usa o núcleo de vídeo Vulkan do fork
-shadPS4 SotC. A base é o [bloodborne_pc](https://github.com/Supermedo/bloodborne_pc) (GPL-2.0).
+Native port of the PS4 **Shadow of the Colossus** (CUSA08809, EU version 1.01, or CUSA08034, US
+version 1.00) to **Linux**.
+The game's code runs directly on the CPU. This is not a full emulator: there is a loader and the
+system functions the game needs. The GPU uses the Vulkan video core of the shadPS4 SotC fork. The
+base is [bloodborne_pc](https://github.com/Supermedo/bloodborne_pc) (GPL-2.0).
 
-Este repositório **não contém o jogo nem firmware da Sony**. Você precisa ter os seus.
+This repository **contains neither the game nor Sony firmware**. You need your own.
 
-## Requisitos
+## Requirements
 
-- Linux x86-64, processador com AVX, BMI1, LZCNT e MOVBE (Intel Haswell / AMD Zen ou mais novo)
-  e GPU com driver Vulkan 1.3 (Mesa RADV ou ANV, ou o da NVIDIA).
-- As ferramentas de compilação e as bibliotecas listadas no `README.md` (Arch / CachyOS: uma
-  linha de `pacman`), e Python 3.
-- O **seu dump** do jogo CUSA08809 ou CUSA08034 (pasta com `eboot.bin`, `sce_module`, `sce_sys`...).
-- **Som:** desde a 0.75 o port tem um **mixer de som embutido**, e o jogo tem som sem nada do
-  console. Opcional: `libSceNgs2.sprx` e `libSceUlt.sprx` do **seu próprio console**, decriptados
-  (os mesmos da pasta `user/sys_modules` do shadPS4; num PS4 com GoldHEN ficam em
-  `/system/common/lib/`, FTP na porta 2121). Com eles, o som é o do firmware:
-  `SOTC_SYS_MODULES=/pasta/com/os/sprx` no `sotc.ini`.
+- Linux x86-64, a CPU with AVX, BMI1, LZCNT and MOVBE (Intel Haswell / AMD Zen or newer) and a GPU
+  with a Vulkan 1.3 driver (Mesa RADV or ANV, or NVIDIA's).
+- The build tools and libraries listed in `README.md` (Arch / CachyOS: one `pacman` line), and
+  Python 3.
+- **Your own dump** of CUSA08809 or CUSA08034 (a folder with `eboot.bin`, `sce_module`,
+  `sce_sys`...).
+- **Sound:** since 0.75 the port has a **built-in sound mixer**, and the game has sound without
+  anything from the console. Optional: `libSceNgs2.sprx` and `libSceUlt.sprx` from **your own
+  console**, decrypted (the same as in shadPS4's `user/sys_modules` folder; on a PS4 with GoldHEN
+  they are in `/system/common/lib/`, FTP on port 2121). With them the sound is the firmware's:
+  `SOTC_SYS_MODULES=/folder/with/the/sprx` in `sotc.ini`.
 
-## Como jogar
+## How to play
 
-1. Deixe o dump ao lado desta pasta (`../CUSA08809` ou `../CUSA08034`) ou escreva
-   `SOTC_GAME_DIR=/caminho/do/jogo` no `sotc.ini`. A atualização 1.01 (`CUSA08809-UPDATE`) e as
-   DLCs (`CUSA08809-DLC`) são achadas ao lado do jogo.
-2. Rode `bash run.sh`: ele compila o port (`out/bb-probe` e `out/gpu/libbbgpu.so`) e abre o jogo.
-   `python3 sotc.py` abre sem compilar.
+1. Put the dump next to this folder (`../CUSA08809` or `../CUSA08034`) or write
+   `SOTC_GAME_DIR=/path/to/the/game` in `sotc.ini`. The 1.01 update (`CUSA08809-UPDATE`) and the
+   DLC (`CUSA08809-DLC`) are found next to the game.
+2. Run `bash run.sh`: it builds the port (`out/bb-probe` and `out/gpu/libbbgpu.so`) and starts the
+   game. `python3 sotc.py` starts it without building.
 
-Na primeira vez a imagem do jogo é preparada, o que leva alguns segundos. Isso só se repete
-quando o jogo ou os módulos mudam. Os saves e o cache de shaders ficam em `user/`, o registro da
-sessão em `user/last_run.log`.
+The first time, the game image is prepared, which takes a few seconds. That is only repeated when
+the game or the modules change. Saves and the shader cache are in `user/`, the session log in
+`user/last_run.log`.
 
-O que se muda no menu do jogo (F1) fica guardado em `user/settings.json` e vale na próxima
-abertura, com os mesmos padrões das versões para Windows (filtro 16x, texturas altas, sem os
-logos...). As opções também podem ser variáveis de ambiente ou linhas `NOME=valor` no `sotc.ini`,
-que valem mais que o arquivo; a lista completa está no começo do `sotc.py`.
+What you change in the in-game menu (F1) is kept in `user/settings.json` and applies at the next
+start, with the same defaults as the Windows releases (16x filtering, high textures, no logos...).
+Options can also be environment variables or `NAME=value` lines in `sotc.ini`, which win over the
+file; the full list is at the top of `sotc.py`.
 
-## Imagem e desempenho
+## Image and performance
 
-No `sotc.ini` (ou no ambiente):
+In `sotc.ini` (or the environment):
 
-- **Saída** (`SOTC_OUTPUT_RES=2560x1440`, por exemplo): 720p, 1080p, 1440p ou 4K. O jogo
-  renderiza em 1080p, como no PS4, e a imagem é ampliada para a saída com **FSR 1** + nitidez
-  (RCAS) ou bilinear. A janela nunca passa de 90% da tela; a tela cheia usa o monitor inteiro.
-- **60 FPS** (`SOTC_MODES=fps60` e `SOTC_FPS_CAP=off`; experimental): tira o limite de 30 FPS
-  do jogo (patch GoldHEN de illusion), com vblank a 120 Hz.
-- **Reutilização de binds** (ligada por padrão; `SOTC_FAST_BIND=0` desliga): pula
-  a remontagem dos descritores quando o desenho seguinte usa o mesmo pipeline, recursos e
-  uniforms. Medido no Santuário: ~25 → 30 FPS. Na 0.60.5 deixava pontos pretos em grade no chão de
-  areia; com a correção o chão de areia do demo ficou limpo.
-- **Texturas nítidas** (`af16` em `SOTC_MODES`, por exemplo `SOTC_MODES=fps60,af16`): filtro
-  anisotrópico 16x, quase sem custo.
-- **HDR** (`hdr` em `SOTC_MODES`): saída HDR10 com a renderização HDR do próprio jogo; o desktop
-  precisa oferecer HDR. O branco fica em 200 nits (`SOTC_HDR_WHITE` muda). Funciona com FSR 1 e DLSS.
-- **Modo PS4 Pro** (`SOTC_NEO=1`): o jogo se vê num PS4 Pro e oferece no próprio menu (Opções > Apresentação)
-  o Modo Grafismo **Cinematográfico** (1440p, mais detalhe) ou **Desempenho**. É mais pesado:
-  ~25 FPS no campo aberto.
-- **Efeitos** (`fx_vignette=0`, `fx_fog=0`, `fx_ssao=0` no `sotc.ini`, ou no menu do jogo):
-  vinheta, névoa atmosférica e oclusão ambiente (SSAO) podem ser desligados. O motion blur, o
-  brilho e os filtros ficam no menu do próprio jogo.
-- **Cvars do motor** (`SOTC_CVARS="NOME=valor NOME=valor"`): variáveis do motor Bluepoint, para
-  quem quer experimentar.
+- **Output** (`SOTC_OUTPUT_RES=2560x1440`, for example): 720p, 1080p, 1440p or 4K. The game renders
+  at 1080p, as on the PS4, and the image is scaled to the output with **FSR 1** + sharpening (RCAS)
+  or bilinear. The window never goes over 90% of the screen; fullscreen uses the whole monitor.
+- **60 FPS** (`SOTC_MODES=fps60` and `SOTC_FPS_CAP=off`; experimental): removes the game's 30 FPS
+  limit (GoldHEN patch by illusion), with a 120 Hz vblank.
+- **Bind reuse** (on by default; `SOTC_FAST_BIND=0` turns it off): skips rebuilding the descriptors
+  when the next draw uses the same pipeline, resources and uniforms. Measured at the Shrine:
+  ~25 → 30 FPS. In 0.60.5 it left a grid of black dots on sandy ground; with the fix the demo's
+  sand is clean.
+- **Sharp textures** (`af16` in `SOTC_MODES`, for example `SOTC_MODES=fps60,af16`): 16x
+  anisotropic filtering, almost free.
+- **HDR** (`hdr` in `SOTC_MODES`): HDR10 output with the game's own HDR rendering; the desktop has
+  to offer HDR. White is at 200 nits (`SOTC_HDR_WHITE` changes it). Works with FSR 1 and DLSS.
+- **PS4 Pro mode** (`SOTC_NEO=1`): the game sees itself on a PS4 Pro and offers, in its own menu
+  (Options > Display), the **Cinematic** graphics mode (1440p, more detail) or **Performance**. It
+  is heavier: ~25 FPS in the open world.
+- **Effects** (`fx_vignette=0`, `fx_fog=0`, `fx_ssao=0` in `sotc.ini`, or in the in-game menu): the
+  vignette, atmospheric fog and ambient occlusion (SSAO) can be turned off. Motion blur, brightness
+  and the filters are in the game's own menu.
+- **Engine cvars** (`SOTC_CVARS="NAME=value NAME=value"`): Bluepoint engine variables, for those
+  who want to experiment.
 
-Os modos de patch valem para a versão EU 1.01 e para a US 1.00 (o executável é o mesmo); em
-outra versão eles não são aplicados. Cada versão tem os seus saves (`user/savedata/1/CUSA08809`
-ou `CUSA08034`) e só usa DLCs da mesma região.
+The patch modes apply to EU 1.01 and US 1.00 (the executable is the same); on other versions they
+are not applied. Each version keeps its own saves (`user/savedata/1/CUSA08809` or `CUSA08034`) and
+only uses DLC of the same region.
 
-## Controles
+## Controls
 
-**Mouse:** clique na janela do jogo para capturar o mouse, que passa a girar a câmera; Esc ou
-trocar de janela solta o mouse. Botão esquerdo = R1 (agarrar), direito = □ (atacar),
-meio = L1. Sensibilidade e inversão ficam no menu do jogo (F1). Para remapear os botões
-do mouse, use `mouse.<entrada>=left,right,middle,x1,x2`.
+**Mouse:** click the game window to capture the mouse, which then turns the camera; Esc or
+switching windows releases it. Left button = R1 (grab), right = □ (attack), middle = L1.
+Sensitivity and inversion are in the in-game menu (F1). To remap the mouse buttons, use
+`mouse.<input>=left,right,middle,x1,x2`.
 
-**Remapear (`sotc.ini`):** uma linha por entrada, com várias opções separadas por vírgula (vazio =
-sem tecla). `key.<entrada>=` troca as teclas (nomes do SDL, como `Q`, `Left Shift`, `Space`) e
-`mouse.<entrada>=` os botões do mouse. Entradas: `cross circle square triangle l1 r1 l2 r2 l3 r3
+**Remapping (`sotc.ini`):** one line per input, with several choices separated by commas (empty =
+no key). `key.<input>=` changes the keys (SDL names such as `Q`, `Left Shift`, `Space`) and
+`mouse.<input>=` the mouse buttons. Inputs: `cross circle square triangle l1 r1 l2 r2 l3 r3
 options touchpad touchpad_right up down left right move_up move_down move_left move_right look_up
-look_down look_left look_right`. Exemplos: atacar com o botão esquerdo e o raio da espada com o
-direito: `mouse.square=left` e `mouse.l1=right` (e `mouse.r1=` para soltar o R1); L1/R1 em outras
-teclas: `key.l1=Q` e `key.r1=E`.
+look_down look_left look_right`. Examples: attack with the left button and the sword's light ray
+with the right one: `mouse.square=left` and `mouse.l1=right` (and `mouse.r1=` to free R1); L1/R1
+on other keys: `key.l1=Q` and `key.r1=E`.
 
-Um controle (DualShock 4, DualSense, Xbox...) é usado automaticamente. Com vários conectados,
-escolha um com `BB_GAMEPAD=` (o nome ou parte dele) no `sotc.ini`. O teclado funciona
-junto com o controle:
+A controller (DualShock 4, DualSense, Xbox...) is used automatically. With several connected, pick
+one with `BB_GAMEPAD=` (its name or part of it) in `sotc.ini`. The keyboard works together with the
+controller:
 
-| Teclado | PS4 |
+| Keyboard | PS4 |
 |---|---|
-| W A S D | analógico esquerdo |
-| setas | analógico direito (câmera) |
-| Espaço | ✕ |
-| Shift esquerdo | ○ |
+| W A S D | left stick |
+| arrows | right stick (camera) |
+| Space | ✕ |
+| Left Shift | ○ |
 | E | □ |
 | Q | △ |
 | 1 / 3 | L1 / R1 |
 | R / F | L2 / R2 |
 | Z / C | L3 / R3 |
 | Enter | Options |
-| I J K L | direcional |
-| Tab / Backspace | touchpad (esquerda / direita) |
+| I J K L | d-pad |
+| Tab / Backspace | touchpad (left / right) |
 
-O controle também pode ser remapeado no `sotc.ini`, por exemplo `pad.circle=b`.
-As entradas são:
+The controller can be remapped in `sotc.ini` too, for example `pad.circle=b`. The inputs are:
 
-- botões: `cross circle square triangle l1 r1 l2 r2 l3 r3 options touchpad touchpad_right`;
-- direcional: `up down left right`;
-- no teclado, os analógicos: `move_up` `move_down` `move_left` `move_right` e
+- buttons: `cross circle square triangle l1 r1 l2 r2 l3 r3 options touchpad touchpad_right`;
+- d-pad: `up down left right`;
+- on the keyboard, the sticks: `move_up` `move_down` `move_left` `move_right` and
   `look_up` `look_down` `look_left` `look_right`.
 
-## Estado
+## Status
 
-Funcionam: logos, abertura, menus com texto, carregar save, exploração a cavalo,
-som (com os módulos do usuário).
+Working: logos, intro, menus with text, loading a save, exploring on horseback, sound (built-in
+mixer, or the console's modules).
 
-Desempenho medido no Santuário da Adoração, jogando, modo 60 FPS, i5-13600KF + RX 6650 XT:
-~72 FPS (`tools/sotc_bench_gameplay.py`). No modo normal o jogo roda travado em 30 FPS, como no PS4.
+Performance measured at the Shrine of Worship, playing, 60 FPS mode, i5-13600KF + RX 6650 XT:
+~72 FPS (`tools/sotc_bench_gameplay.py`). In the normal mode the game runs locked at 30 FPS, as on
+the PS4.
 
-## Perguntas comuns
+## Common questions
 
-- **DirectX 11/12?** Não. O núcleo de vídeo (shadPS4) traduz a GPU do PS4 para Vulkan; os
-  shaders do jogo viram SPIR-V. Toda placa de vídeo com DirectX 12 recente também tem Vulkan
-  1.3: atualize o driver. Um modo DirectX exigiria reescrever o núcleo de vídeo inteiro.
-- **Placas AMD e Intel?** As otimizações valem para qualquer placa, menos duas que só ligam
-  sozinhas na NVIDIA (o envio periódico de trabalho à GPU e as leituras antecipadas). Para
-  testá-las na AMD ou Intel: `SOTC_FLUSH_US=1000` e `SOTC_RB_AHEAD=1` no `sotc.ini`; se a tela
-  ficar preta, tire as duas linhas.
-- **Preciso de arquivos do console para ter som?** Não, desde a 0.75: o mixer embutido do port
-  toca o som. `libSceNgs2.sprx` e `libSceUlt.sprx` (firmware da Sony, que não pode ser
-  distribuído) continuam opcionais; com eles, o som é o do firmware.
+- **DirectX 11/12?** No. The video core (shadPS4) translates the PS4 GPU to Vulkan; the game's
+  shaders become SPIR-V. Every recent graphics card with DirectX 12 also has Vulkan 1.3: update the
+  driver. A DirectX mode would mean rewriting the whole video core.
+- **AMD and Intel cards?** The optimizations apply to any card. Two of them turn on by themselves
+  only on NVIDIA and AMD (the periodic submission of work to the GPU and the readbacks ahead). To
+  try them on Intel: `SOTC_FLUSH_US=1000` and `SOTC_RB_AHEAD=1` in `sotc.ini`; if the screen goes
+  black, remove both lines.
+- **Do I need files from the console for sound?** No, since 0.75: the port's built-in mixer plays
+  the sound. `libSceNgs2.sprx` and `libSceUlt.sprx` (Sony firmware, which cannot be distributed)
+  stay optional; with them the sound is the firmware's.
 
-## Créditos
+## Credits
 
-- [bloodborne_pc](https://github.com/Supermedo/bloodborne_pc) (bbport, deadinside28 e forks): carregador
-  e runtime nativo, base deste port.
-- [shadPS4](https://github.com/shadps4-emu/shadPS4) e o fork shadPS4 SotC: núcleo de vídeo Vulkan.
-- [Pink-shadPS4](https://github.com/luizgustavs/Pink-shadPS4) (luizgustavs): as cvars de culling, a proteção
-  do heap do jogo contra leituras da GPU (`bpe_heap_guard`), o flush periódico, as leituras antecipadas,
-  o marcador de espera e o gravador de comandos Vulkan em thread própria (`cp_record_thread`).
+- [bloodborne_pc](https://github.com/Supermedo/bloodborne_pc) (bbport, deadinside28 and forks): the
+  native loader and runtime this port is based on.
+- [shadPS4](https://github.com/shadps4-emu/shadPS4) and the shadPS4 SotC fork: the Vulkan video
+  core.
+- [Pink-shadPS4](https://github.com/luizgustavs/Pink-shadPS4) (luizgustavs): the culling cvars, the
+  protection of the game's heap against GPU reads (`bpe_heap_guard`), the periodic flush, the
+  readbacks ahead, the wait marker and the Vulkan command recorder on its own thread
+  (`cp_record_thread`).
 
-## Diagnóstico
+## Diagnostics
 
-Estas variáveis de ambiente ajudam a investigar problemas:
+These environment variables help investigate problems:
 
-| Variável | Efeito |
+| Variable | Effect |
 |---|---|
-| `SOTC_FPS=1` | taxa de quadros a cada 5 s |
-| `BB_READBACKS=0/1/2` | leituras da GPU; o padrão 2 é o exigido pelo jogo |
-| `SOTC_FAST_BIND=0` | desliga o reaproveitamento de binds de descritores entre desenhos iguais (padrão: ligado) |
-| `SOTC_RECORD_THREAD=0` | grava os comandos Vulkan na própria thread de comandos (padrão: thread própria) |
-| `SOTC_INDIRECT_DIRECT=0` | mantém indiretos os draws cujos argumentos estão na CPU |
-| `SOTC_WAIT_MARKER=1/2` | esperas pela GPU consultam um marcador escrito por ela (experimental) |
-| `SOTC_CMD_STATS=1/2` | draws e dispatches por quadro (2: shaders de compute mais usados) |
-| `SOTC_AMD_WAVE32=1` | só AMD, para testar nas GCN (RX 470-590, Vega, integradas): os shaders são convertidos para 32 lanes, como faz a camada SotC-AMD-Fix (personagens piscando em branco). O cache de shaders é refeito; o log mostra `GPU: AMD wave32 on`. De Lucas-blip-png |
-| `SOTC_SLOW_BUILD_MS=500` | o log mostra `SOTC SLOW BUILD` para cada pipeline construído em segundo plano (ou esperado pela gravação de comandos) que levou esse tempo ou mais; `SOTC SYNC PIPELINE` mostra os construídos na thread de comandos acima de 30 ms (`SOTC_SYNC_PIPELINE_MS`). Para as travadas longas nas placas Intel Arc |
-| `SOTC_HDR_WHITE=nits` | com HDR: o branco do jogo em nits (padrão 200; a saída do próprio jogo tem ~100) |
-| `SOTC_EVICT_ASYNC=0` | a devolução de memória fria das arenas espera a GPU no processador de comandos, como antes (~44 ms por vez) |
-| `SOTC_UI_HIRES=0` | com DLSS, a interface (textos, logos, HUD) volta a ser desenhada na resolução de renderização e ampliada, em vez de na resolução de saída |
+| `SOTC_FPS=1` | frame rate every 5 s |
+| `BB_READBACKS=0/1/2` | GPU readbacks; the default 2 is what the game needs |
+| `SOTC_FAST_BIND=0` | turns off reusing descriptor binds between identical draws (default: on) |
+| `SOTC_RECORD_THREAD=0` | records the Vulkan commands on the command thread itself (default: a thread of its own) |
+| `SOTC_INDIRECT_DIRECT=0` | keeps indirect the draws whose arguments are on the CPU |
+| `SOTC_WAIT_MARKER=1/2` | waits for the GPU read a marker it writes (experimental) |
+| `SOTC_CMD_STATS=1/2` | draws and dispatches per frame (2: the most used compute shaders) |
+| `SOTC_AMD_WAVE32=1` | AMD only, for testing on GCN (RX 470-590, Vega, integrated): the shaders are converted to 32 lanes, as the SotC-AMD-Fix layer does (characters flashing white). The shader cache is rebuilt; the log shows `GPU: AMD wave32 on`. By Lucas-blip-png |
+| `SOTC_SLOW_BUILD_MS=500` | the log shows `SOTC SLOW BUILD` for each pipeline built in the background (or waited for by the command recording) that took that long or more; `SOTC SYNC PIPELINE` shows those built on the command thread over 30 ms (`SOTC_SYNC_PIPELINE_MS`). For the long stalls on Intel Arc cards |
+| `SOTC_HDR_WHITE=nits` | with HDR: the game's white in nits (default 200; the game's own output has ~100) |
+| `SOTC_EVICT_ASYNC=0` | giving back the arenas' cold memory waits for the GPU on the command processor, as before (~44 ms each time) |
+| `SOTC_UI_HIRES=0` | with DLSS, the interface (text, logos, HUD) is drawn at the render resolution and scaled again, instead of at the output resolution |
 | `SOTC_FSRFG_ASYNC=1` | FSR 3 frame generation: its passes run on a compute queue of their own, beside the game's drawing, at low priority (`SOTC_FSRFG_ASYNC_PRIORITY=0`: the driver's default). Off by default: on an RX 6650 XT it gained no FPS (62.2 vs 61.6) and the generated frame went out ~5 ms later. The log shows `GPU frame generation queue` |
 | `SOTC_FSRFG_NO_WORK=1` | measurement only: with FSR 3 on, the game frame is copied in place of the generated one; the two presents and the pacing stay, only FSR 3's GPU work goes |
 | `SOTC_PIN=1` / `2` | Linux, test (upstream PR #464): the three heavy GPU threads (draw, command processor, recorder) get a P-core each; with `1` the other thread of those cores stays empty and the game's other threads keep off them, with `2` only the three CPUs are reserved. Released during loads (under 25 FPS). Off by default: on an i5-13600KF it did not change the Shrine FPS (74.8 vs 74.4, five runs each) |
 | `SOTC_WINDOW_BEHIND=1` | automated tests: the window opens without asking for the focus (on Linux the compositor decides; COSMIC focuses it anyway) |
-| `SOTC_PCORES=0` | Linux, processadores Intel com núcleos P e E (12ª geração em diante): as threads da GPU (processador de comandos, desenho e gravação) voltam a rodar em qualquer núcleo (padrão: só nos núcleos P, onde rendem mais) |
-| `SOTC_PROFILE=nome` | amostra a thread com esse nome a cada ~1 ms, de `SOTC_PROFILE_DELAY` s (padrão 20) por `SOTC_PROFILE_SECONDS` s (padrão 15), e lista onde ela gasta tempo. No Linux o nome são os 15 primeiros caracteres (`shadPS4:GpuComm`, `shadPS4:GpuDraw`, `shadPS4:GpuReco`); `SOTC_PROFILE_OUT=arquivo` grava as amostras para `tools/profile_functions.py arquivo out/gpu/libbbgpu.so`; `SOTC_THREAD_TIMES=1` mostra o tempo de CPU de cada thread na mesma janela |
+| `SOTC_PCORES=0` | Linux, Intel CPUs with P- and E-cores (12th generation onwards): the GPU threads (command processor, draw and recorder) run on any core again (default: only on the P-cores, where they do more) |
+| `SOTC_PROFILE=name` | samples the thread with that name every ~1 ms, from `SOTC_PROFILE_DELAY` s (default 20) for `SOTC_PROFILE_SECONDS` s (default 15), and lists where it spends its time. On Linux the name is the first 15 characters (`shadPS4:GpuComm`, `shadPS4:GpuDraw`, `shadPS4:GpuReco`); `SOTC_PROFILE_OUT=file` saves the samples for `tools/profile_functions.py file out/gpu/libbbgpu.so`; `SOTC_THREAD_TIMES=1` shows every thread's CPU time over the same window |

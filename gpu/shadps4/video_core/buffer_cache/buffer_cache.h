@@ -419,7 +419,7 @@ private:
     u64 rb_narrow_window{};
     static constexpr auto HotReadbackLifetime = std::chrono::seconds(2);
     std::vector<HotReadback> hot_readbacks;
-    /// sotc: SOTC_RB_GROUP (plan PLANO-TROCA-DE-AREA etapa 1): ranges written by the visibility
+    /// sotc: SOTC_RB_GROUP (plan PLAN-AREA-CHANGE step 1): ranges written by the visibility
     /// (cull) programs, with the program and the command buffer tick. A readback that faults on
     /// one brings along the ranges that program wrote in this and the previous command buffer,
     /// as hot regions (pages the CPU wrote since are skipped): one wait instead of one per page.
