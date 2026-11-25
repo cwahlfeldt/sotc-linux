@@ -52,7 +52,10 @@ def main():
     for f in (start_file, shot):
         f.unlink(missing_ok=True)
     pad.write_text('')
+    # The player's settings (user/settings.json, sotc.py) must not change what is measured: no FPS
+    # limit, no dynamic step, no frame generation; the window opens without the focus.
     env = ['SOTC_PREFETCH=0', 'SOTC_MODES=fps60,af16', 'SOTC_FPS_CAP=off', 'SOTC_FPS=1',
+           'SOTC_FPS_LIMIT=0', 'SOTC_FPS_DYNAMIC=0', 'SOTC_FRAMEGEN=off', 'SOTC_WINDOW_BEHIND=1',
            f'BB_PAD_FILE={pad}', f'BB_FRAME_DUMP_TRIGGER={shot}', f'SOTC_PROFILE_START={start_file}', *args.env]
     command = [*shlex.split(os.environ.get('SOTC_BENCH_WRAP', '')), 'env', *env,
                'timeout', '--signal=INT', '600', sys.executable, 'sotc.py']

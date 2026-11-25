@@ -141,6 +141,14 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
             SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         }
     }
+#else
+    // sotc (Linux): shown without asking for activation (the hints above); it was left hidden
+    // before, never presented. Wayland has no "behind", and the compositor decides the focus:
+    // COSMIC focuses a new window anyway, so a test run there can still take keys typed into the
+    // desktop (an F7 once changed the FPS mode mid-benchmark).
+    if (behind) {
+        SDL_ShowWindow(window);
+    }
 #endif
 
     const char* driver = SDL_GetCurrentVideoDriver();

@@ -140,7 +140,9 @@ WIDE_ASPECT = (0x00495b3e, 'a', 'c74304398ee33f')  # the display object's aspect
 RT_POOL = 0x14280000
 # EU 1.01 / US 1.00: the command line lea and the fps60 site.
 VERSION_CHECKS = [(CMDLINE_LEA, bytes.fromhex('488d352debad00')), (0x01390090, bytes.fromhex('ff25a20567'))]
-CVAR = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*((=[-+.0-9A-Za-z_%]+)|(\([-+.0-9A-Za-z_,% ]*\)))?$')  # NAME=VALUE, NAME(ARGS) or a flag such as nointro
+# NAME=VALUE, NAME(ARGS) or a flag such as nointro; ARGS may hold a guest path
+# (automate_loadfile(/temp0/plan.txt), tools/sotc_ride_bench.py).
+CVAR = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*((=[-+.0-9A-Za-z_%]+)|(\([-+./0-9A-Za-z_,% ]*\)))?$')
 
 
 def image_bytes(elf, ph, vaddr, length):

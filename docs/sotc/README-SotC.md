@@ -158,5 +158,6 @@ Estas variáveis de ambiente ajudam a investigar problemas:
 | `SOTC_HDR_WHITE=nits` | com HDR: o branco do jogo em nits (padrão 200; a saída do próprio jogo tem ~100) |
 | `SOTC_EVICT_ASYNC=0` | a devolução de memória fria das arenas espera a GPU no processador de comandos, como antes (~44 ms por vez) |
 | `SOTC_UI_HIRES=0` | com DLSS, a interface (textos, logos, HUD) volta a ser desenhada na resolução de renderização e ampliada, em vez de na resolução de saída |
+| `SOTC_WINDOW_BEHIND=1` | automated tests: the window opens without asking for the focus (on Linux the compositor decides; COSMIC focuses it anyway) |
 | `SOTC_PCORES=0` | Linux, processadores Intel com núcleos P e E (12ª geração em diante): as threads da GPU (processador de comandos, desenho e gravação) voltam a rodar em qualquer núcleo (padrão: só nos núcleos P, onde rendem mais) |
 | `SOTC_PROFILE=nome` | amostra a thread com esse nome a cada ~1 ms, de `SOTC_PROFILE_DELAY` s (padrão 20) por `SOTC_PROFILE_SECONDS` s (padrão 15), e lista onde ela gasta tempo. No Linux o nome são os 15 primeiros caracteres (`shadPS4:GpuComm`, `shadPS4:GpuDraw`, `shadPS4:GpuReco`); `SOTC_PROFILE_OUT=arquivo` grava as amostras para `tools/profile_functions.py arquivo out/gpu/libbbgpu.so`; `SOTC_THREAD_TIMES=1` mostra o tempo de CPU de cada thread na mesma janela |
