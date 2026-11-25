@@ -1835,6 +1835,12 @@ static int null_object_skip(ucontext_t *uc) {
     else if (g[REG_RAX]==0 && at==0x144c60) resume=0x144c71;
     else if (g[REG_RAX]==0 && at==0x14934f) resume=0x149360;
     else if (g[REG_R14]==0 && at==0x14cce7) resume=0x14ced6;
+    /* 0x499cc (upstream PR #464): the allocator (0x49960..0x49a00) unlinking a heap block from
+     * its size list found the block's list links already zero (rax = rcx = 0: freed twice, or
+     * its memory cleared), right after a 0x564d24 skip while saving the profile. Treated as "not
+     * in the list": both link writes and the count decrement are skipped (0x499e0 clears the
+     * block's fields as the normal path does). */
+    else if (g[REG_RAX]==0 && g[REG_RCX]==0 && at==0x499cc) resume=0x499e0;
     if (!resume) return 0;
     g[REG_RIP]=(greg_t)(uintptr_t)(image+resume);
     static int skipped;
