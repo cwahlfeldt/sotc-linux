@@ -29,6 +29,10 @@ Settings (environment variables, or sotc.ini beside this script as NAME=value li
     SOTC_CVARS        engine settings, NAME=VALUE separated by spaces (e.g. r_motionBlurEnable=0)
     BB_GAMEPAD        the gamepad to use (its name or part of it), when several are connected
     key.<input>=Keys, pad.<input>=buttons   remap the controls (README.md, Controles)
+<user>/settings.json holds the start-up settings the Windows launcher used to keep (FPS mode, texture
+quality, output size, upscaler, frame generation, volume, grass, effects...; SETTINGS_DEFAULTS below).
+This script creates it and turns it into the game's variables at every start; the in-game menu
+saves its changes into it. A variable set in the environment or in sotc.ini wins over the file.
 build.sh builds out/bb-probe and its GPU library (out/gpu/libbbgpu.so), which this script starts.
 The image is prepared again only when the game, the modules or the scripts change.
 Extra arguments go to bb-probe. Run from a console, the session is also saved to
@@ -77,6 +81,395 @@ def run_script(name, *args):
     result = subprocess.run([sys.executable, str(SCRIPTS / name), *map(str, args)], stdin=subprocess.DEVNULL)
     if result.returncode:
         sys.exit(result.returncode)
+
+
+# ---------------------------------------------------------------------------------------------
+# Start-up settings: what the Windows launcher passed to the game (its game_environment), kept in
+# <user>/settings.json. The in-game menu writes its changes there (SOTC_LAUNCHER_SETTINGS,
+# gpu/shim/bbport_overlay.cpp) and they apply at the next start. Every value becomes environment
+# variables with setdefault: a variable set in the environment or in sotc.ini wins over the file.
+
+# The shader version of the caches: bump it when a change makes the saved shaders and pipelines
+# wrong (shader_recompiler or renderer output); the next start clears the cache once.
+SHADER_CACHE_VERSION = '0.76.2'
+
+SETTINGS_DEFAULTS = {
+    'ui_language': '', 'audio_channels': 'auto', 'audio_lfe': True, 'audio_device': '',
+    'af16': True, 'textures': 'high', 'hdr': False, 'fps_mode': '30', 'fps_dynamic': True,
+    'button_icons': 'ps', 'fullscreen': False, 'present_mode': 'Mailbox', 'language': '',
+    'player_name': '', 'show_fps': False, 'readbacks': '', 'debug_menu': False, 'debug_watch': False,
+    'rb_hot': True, 'skip_logos': True, 'skip_film': False, 'gamepad': '', 'rumble': True,
+    'output_res': '1920x1080', 'upscaler': 'fsr1', 'sharpness': '250', 'mouse': True,
+    'mouse_sens': '1.0', 'mouse_invert': False, 'neo': False, 'fx_vignette': True, 'fx_fog': True,
+    'fx_ssao': True, 'fx_motionblur': False, 'engine_cvars': '', 'perf_culling': True,
+    'perf_record_thread': True, 'perf_dma': True, 'gpu_submit': 'auto', 'vram_use': 'normal',
+    'vram_profile': 'auto', 'volume': '100', 'shadow_reuse': '0', 'grass_shadows': '2',
+    'grass_distance': '1', 'grass_height': '1', 'weed_distance': '1', 'weed_height': '1',
+    'grass_fade': '1', 'grass_detail': '1', 'framegen': 'off', 'fg_hudless': True, 'fg_mult': '2',
+    'dlss_mode': 'quality', 'dlss_sharpen': '0', 'dlss_ui_sharpen': '3', 'dlss_sky_sharpen': '2',
+    'dlss_compare': False, 'hdr_sdr': False, 'play_mode': 'custom',
+}
+# Rule: an update turns its improvements on. A default changed for the better goes here with the
+# version (VERSION) that changed it; settings saved by an older version get it once, else the saved
+# value would keep the old default for good.
+DEFAULT_UPGRADES = [
+    # HUD and letters steady with frame generation; no shadow trail in dark areas (motion blur);
+    # straight to the game.
+    ('0.71', {'fg_hudless': True, 'fx_motionblur': False, 'skip_logos': True}),
+    # Fast GPU readbacks; the grass as on PS4.
+    ('0.72', {'rb_hot': True, 'grass_shadows': '2', 'grass_distance': '1', 'grass_height': '1',
+              'weed_distance': '1', 'weed_height': '1', 'grass_fade': '1', 'grass_detail': '1'}),
+    # Dynamic FPS in the 60 FPS mode (a steady step below 60 when the game cannot keep it).
+    ('0.73', {'fps_dynamic': True}),
+]
+# Video memory use (#143): texture collection from % of the card's budget, arena release from MB
+# (0 = never).
+VRAM_LIMITS = {'low': ('50', '1024'), 'normal': ('60', '1536'), 'high': ('75', '4096'), 'max': ('85', '0')}
+# The 0.72 texture set (Maximum at mip 0, High at mip 1) used 5-7 GB on an 8 GB card: cards below
+# this get the lighter one (vram_profile auto; light / full choose).
+LIGHT_VRAM_BELOW_MB = 7500
+# Effects switched off through engine cvars when their setting is false.
+EFFECT_CVARS = {'fx_vignette': 'r_vignetteOverrideEnable=1 r_vignetteEnable=0', 'fx_fog': 'fog_enable=0',
+                'fx_ssao': 'AO_Mode=0', 'fx_motionblur': 'r_motionBlurEnable=0'}
+DLSS_FACTORS = {'dlaa': 1.0, 'quality': 1.5, 'balanced': 1.724, 'performance': 2.0, 'ultra': 3.0}
+
+
+def version_key(text):
+    return tuple(int(part) if part.isdigit() else 0 for part in str(text).replace('-', '.').split('.'))
+
+
+def port_version():
+    try:
+        return (PORT / 'VERSION').read_text().strip()
+    except OSError:
+        return ''
+
+
+def load_settings(path, version):
+    """The saved settings over the defaults, with the upgrades of versions newer than the one that
+    saved them. Written back complete: the in-game menu only changes keys the file has."""
+    import json
+    try:
+        saved = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        saved = {}
+    if not isinstance(saved, dict):
+        saved = {}
+    settings = {**SETTINGS_DEFAULTS, **saved}
+    if saved:
+        before = version_key(saved.get('settings_version') or '0')
+        for upgrade, values in DEFAULT_UPGRADES:
+            if before < version_key(upgrade):
+                settings.update(values)
+    settings['settings_version'] = version or str(saved.get('settings_version') or '')
+    if settings != saved:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(settings, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
+        except OSError:
+            pass
+    return settings
+
+
+def check_shader_cache(user, version):
+    """A port update whose shaders differ (SHADER_CACHE_VERSION) clears the shader and pipeline cache
+    once: those built by the previous port can conflict with the new one (wrong or missing effects,
+    crashes when one is loaded). <user>/cache/port_version.txt keeps the port version that uses the
+    cache and the shader version it holds. A cache without that file (any built before it existed)
+    is kept and the file written. SOTC_CACHE_CLEAR_EVERY_UPDATE=1 clears on every port update."""
+    marker = user / 'cache' / 'port_version.txt'
+    try:
+        lines = marker.read_text(encoding='utf-8').split()
+    except OSError:
+        lines = []
+    if lines:
+        built_by = lines[0]
+        shaders = lines[1].removeprefix('shaders=') if len(lines) > 1 else built_by
+        if os.environ.get('SOTC_CACHE_CLEAR_EVERY_UPDATE') == '1':
+            stale = built_by != version
+        else:
+            stale = shaders != SHADER_CACHE_VERSION
+        if not stale and built_by == version:
+            return
+        if stale:
+            print('Port update: the shader cache is built again', file=sys.stderr)
+            for name in ('cache', 'shader'):
+                shutil.rmtree(user / name, ignore_errors=True)
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(f'{version}\nshaders={SHADER_CACHE_VERSION}\n', encoding='utf-8')
+    except OSError:
+        pass
+
+
+def gpu_vram_mb():
+    """The video memory of the GPU the game will use (out/bb-gpu-capabilities: its largest
+    device-local heap, picked as the renderer picks it); 0 when unknown."""
+    import re
+    try:
+        result = subprocess.run([str(PORT / 'out' / 'bb-gpu-capabilities'), '--live-resolution'],
+                                capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return 0
+    match = re.search(r', (\d+) MiB:', result.stderr)
+    return int(match.group(1)) if match else 0
+
+
+def memory_gb():
+    try:
+        return os.sysconf('SC_PHYS_PAGES') * os.sysconf('SC_PAGE_SIZE') / 2 ** 30
+    except (ValueError, OSError):
+        return 0
+
+
+def screen_refresh_hz():
+    """The primary screen's refresh rate, from SDL3 (the game's own library); 60 when unknown."""
+    import ctypes
+    import ctypes.util
+
+    class DisplayMode(ctypes.Structure):
+        _fields_ = [('display', ctypes.c_uint32), ('format', ctypes.c_uint32), ('w', ctypes.c_int),
+                    ('h', ctypes.c_int), ('pixel_density', ctypes.c_float), ('refresh_rate', ctypes.c_float),
+                    ('numerator', ctypes.c_int), ('denominator', ctypes.c_int), ('internal', ctypes.c_void_p)]
+    try:
+        sdl = ctypes.CDLL(ctypes.util.find_library('SDL3') or 'libSDL3.so.0')
+        sdl.SDL_Init.argtypes = [ctypes.c_uint32]
+        sdl.SDL_Init.restype = ctypes.c_bool
+        sdl.SDL_GetPrimaryDisplay.restype = ctypes.c_uint32
+        sdl.SDL_GetCurrentDisplayMode.argtypes = [ctypes.c_uint32]
+        sdl.SDL_GetCurrentDisplayMode.restype = ctypes.POINTER(DisplayMode)
+    except (OSError, AttributeError):
+        return 60
+    if not sdl.SDL_Init(0x20):  # SDL_INIT_VIDEO
+        return 60
+    try:
+        mode = sdl.SDL_GetCurrentDisplayMode(sdl.SDL_GetPrimaryDisplay())
+        rate = mode.contents.refresh_rate if mode else 0.0
+        return int(rate + 0.5) if rate > 1 else 60
+    finally:
+        sdl.SDL_Quit()
+
+
+def desktop_language():
+    """The menu language of the desktop (LANGUAGE, LC_ALL, LC_MESSAGES, LANG): pt, es, zh, ko, ru, else en."""
+    for name in ('LANGUAGE', 'LC_ALL', 'LC_MESSAGES', 'LANG'):
+        code = os.environ.get(name, '')[:2].lower()
+        if code:
+            return code if code in ('pt', 'es', 'zh', 'ko', 'ru') else 'en'
+    return 'en'
+
+
+def game_version(source):
+    """The game's version (APP_VER of its param.sfo, the update's when there is one); '' if unknown."""
+    sys.path.insert(0, str(SCRIPTS))
+    try:
+        from prepare import sfo
+        return str(sfo((source / 'sce_sys' / 'param.sfo').read_bytes()).get('APP_VER', ''))
+    except (OSError, ValueError, ImportError):
+        return ''
+    finally:
+        sys.path.remove(str(SCRIPTS))
+
+
+def dlss_render(output, mode):
+    """The render size for DLSS / FSR 4 mode at output WxH: multiples of 8, at least 640x360 (DLAA:
+    the output size), the exact aspect when a size within 6% of the factor has it."""
+    try:
+        w, h = map(int, output.split('x'))
+    except ValueError:
+        return output
+    if mode == 'dlaa':
+        return output
+    target = h / DLSS_FACTORS.get(mode, 1.5)
+    exact = [rh for rh in range(360, h + 1, 8) if rh * w % (h * 8) == 0 and abs(rh - target) <= target * 0.06]
+    rh = min(exact, key=lambda rh: abs(rh - target)) if exact else max(360, round(target / 8) * 8)
+    rw = max(640, round(rh * w / h / 8) * 8)
+    return f'{rw}x{rh}'
+
+
+def is_wide(size):
+    """True for a WxH wider than 16:9 (by more than 2%)."""
+    try:
+        w, h = map(int, str(size).split('x'))
+    except ValueError:
+        return False
+    return w * 9 > h * 16 * 1.02
+
+
+def settings_env(env, s, settings_file, source):
+    """The environment the settings ask for, as the Windows launcher set it (setdefault: what the
+    environment or sotc.ini already has wins)."""
+    put = env.setdefault
+    version = game_version(source)
+    if version:
+        put('SOTC_GAME_VERSION', version)  # window title
+    put('SOTC_LAUNCHER_SETTINGS', str(settings_file))  # the in-game menu writes its changes here
+    # The 30 FPS cap is applied or not by bb-probe (sotc_fps_cap.h), F7 switches it in game; above 30
+    # the game targets 60 FPS itself (fps60game), so its timing follows (#100, #120, #49). grassbuf:
+    # grass buffers 4x larger (the farthest grass popped in patches at longer grass distances).
+    fps_mode = str(s.get('fps_mode') or '30')
+    modes = ['af16'] if s.get('af16') else []
+    if fps_mode != '30':
+        modes.append('fps60game')
+    modes.append('grassbuf')
+    if s.get('hdr'):
+        modes.append('hdr')
+    put('SOTC_MODES', ','.join(modes))
+    put('SOTC_FPS_CAP', '30' if fps_mode == '30' else 'off')
+    put('SOTC_FPS_LIMIT', '60' if fps_mode == '60' else '0')
+    # Dynamic FPS (videoout driver.cpp): with the 60 FPS limit, frames that cannot keep 60 lower it to
+    # a step that divides the screen's refresh (48 at 144 Hz, 40 at 120/240 Hz, 30 at 60 Hz).
+    if fps_mode == '60' and s.get('fps_dynamic', True) and 'SOTC_FPS_DYNAMIC' not in env:
+        hz = screen_refresh_hz()
+        env['SOTC_FPS_DYNAMIC'] = str(48 if hz % 48 == 0 else 40 if hz % 40 == 0 else 45 if hz % 45 == 0 else 30)
+    put('BB_FULLSCREEN', '1' if s.get('fullscreen') else '0')
+    put('BB_PRESENT_MODE', str(s.get('present_mode') or 'Mailbox'))
+    if s.get('language'):
+        put('BB_LANGUAGE', str(s['language']))
+    if str(s.get('player_name') or '').strip():
+        put('BB_USER_NAME', str(s['player_name']).strip())
+    if s.get('show_fps'):
+        put('SOTC_FPS', '1')
+    if s.get('readbacks'):
+        put('BB_READBACKS', str(s['readbacks']))
+    if 'SOTC_CVARS' not in env:
+        cvars = [off for key, off in EFFECT_CVARS.items() if not s.get(key, True)]
+        if s.get('perf_culling', True):
+            # From Pink-shadPS4: no GPU index-buffer culling, same image, far fewer GPU results the
+            # CPU has to wait for.
+            cvars += ['doIndexBufferCulling=0', 'doSunShadowIndexBufferCulling=0']
+        grass = str(s.get('grass_shadows') or '2')
+        if grass in ('3', '4'):
+            cvars += [f'r_virtualGeometryNumShadowCascades{mode}={grass}'
+                      for mode in ('', '_BasePS4', '_Perf', '_Cinematic')]
+        fade = str(s.get('grass_fade') or '1')
+        if fade in ('0.5', '0.75', '2', '3'):
+            cvars.append(f'r_virtualGeometryFadeMultiplier={fade}')
+        if s.get('skip_logos'):
+            cvars.append('skipSplash=1')  # no opening logos and autosave notice (#185)
+        if s.get('skip_film'):
+            cvars.append('nointro')  # no intro film and no title screen
+        cvars += str(s.get('engine_cvars') or '').split()
+        cvars += env.get('SOTC_EXTRA_CVARS', '').split()
+        env['SOTC_CVARS'] = ' '.join(cvars)
+    # Multipliers for the grass shaders' view distances and blade height (vk_rasterizer.cpp).
+    put('SOTC_GRASS', ' '.join(str(s.get(k) or '1') for k in
+                               ('grass_distance', 'grass_height', 'weed_distance', 'weed_height', 'grass_detail')))
+    put('SOTC_RECORD_THREAD', '1' if s.get('perf_record_thread', True) else '0')
+    if not s.get('perf_dma', True):
+        put('BB_DIRECT_MEMORY_ACCESS', '0')
+    # Periodic submits and readbacks ahead: by default only with NVIDIA (vk_rasterizer.cpp).
+    if s.get('gpu_submit') == 'on':
+        put('SOTC_FLUSH_US', '1000')
+        put('SOTC_RB_AHEAD', '1')
+    elif s.get('gpu_submit') == 'off':
+        put('SOTC_FLUSH_EVERY', '0')
+        put('SOTC_RB_AHEAD', '0')
+    profile = str(s.get('vram_profile') or 'auto')
+    if profile == 'auto':
+        mb = gpu_vram_mb()
+        light = 0 < mb < LIGHT_VRAM_BELOW_MB
+    else:
+        light = profile == 'light'
+    vram_use = str(s.get('vram_use') or 'normal')
+    if light and vram_use in ('high', 'max'):
+        vram_use = 'normal'  # High / Maximum hold more than such a card has
+    gc_percent, evict_mb = VRAM_LIMITS.get(vram_use, VRAM_LIMITS['normal'])
+    put('SOTC_VRAM_GC_PERCENT', gc_percent)
+    put('SOTC_ARENA_EVICT_MB', evict_mb)
+    if light:
+        put('SOTC_STAGING_KEEP_VRAM_MB', '0')
+    # Sound (runtime_audio.c).
+    put('SOTC_VOLUME', str(s.get('volume') or '100'))
+    if str(s.get('audio_channels') or 'auto') in ('2', '6', '8'):
+        put('SOTC_AUDIO_CHANNELS', str(s['audio_channels']))
+    if not s.get('audio_lfe', True):
+        put('SOTC_AUDIO_LFE', '0')
+    if str(s.get('audio_device') or '').strip():
+        put('SOTC_AUDIO_DEVICE', str(s['audio_device']).strip())
+    put('SOTC_SHADOW_REUSE', str(s.get('shadow_reuse') or '0'))
+    put('SOTC_OUTPUT_RES', str(s.get('output_res') or '1920x1080'))
+    # The PS4 Pro path keeps its 16:9 sizes: a wider screen (21:9, 32:9) wins over it (#142).
+    neo = bool(s.get('neo')) and not is_wide(env['SOTC_OUTPUT_RES'])
+    put('SOTC_NEO', '1' if neo else '0')
+    if s.get('neo') and not neo:
+        put('SOTC_NOTE', f"{env['SOTC_OUTPUT_RES']} is wider than 16:9: PS4 Pro mode off (it renders 16:9 only)")
+    put('SOTC_FRAMEGEN', str(s.get('framegen') or 'off'))
+    if s.get('fg_hudless'):
+        put('SOTC_FG_HUDLESS', '1')
+    fg_mult = str(s.get('fg_mult') or '2')  # DLSS-G multiplier (#314)
+    if fg_mult == 'dynamic':
+        put('SOTC_DLSSG_MODE', 'dynamic')
+        put('SOTC_DLSSG_FRAMES', '5')  # the most the card allows; Streamline picks the number
+    elif fg_mult in ('3', '4', '6'):
+        put('SOTC_DLSSG_FRAMES', str(int(fg_mult) - 1))
+    # High quality textures (sotc_lod_stats.h): the texture banks sampled since the last report read
+    # as sampled, the measured mips, finer mips (High 1, Maximum 0; light set Maximum 1 / High 2).
+    textures = str(s.get('textures') or 'high')
+    if textures != 'off':
+        put('SOTC_LOD_LINGER', '1')
+        put('SOTC_LOD_FEEDBACK', '1')
+        if light:
+            put('SOTC_LOD_LEVEL', '1' if textures == 'max' else '2')
+        else:
+            put('SOTC_LOD_LEVEL', '0' if textures == 'max' else '1')
+    # 0.72.2 (T51): the page pool pages the game returns under textures it still draws stay frozen
+    # (stretched textures and flicker at the ending).
+    put('SOTC_POOL_FREEZE', '1')
+    # 0.72.2 (T48): an unmap's arena release waits for the GPU once it passed the unmap, not for all
+    # of its work (28-63 waits a frame at area changes).
+    put('SOTC_RELEASE_DEFER', '1')
+    # 0.72.2: images of 2048x2048 and more get memory of their own (the shared 64 MiB blocks kept up
+    # to 1.8 GB free after an area's textures went).
+    put('SOTC_IMAGE_DEDICATED', '1')
+    # 0.72.2 / 0.77 (T48): new textures read and gathered by the GPU in the game's memory (no CPU
+    # copy at an area's first entry). The game's 10 GB stay imported and pinned: 24 GB of RAM or more.
+    if memory_gb() >= 24:
+        put('SOTC_PC_MEMORY', '1')
+        put('SOTC_PC_MEMORY_PREIMPORT', '1')
+        put('SOTC_TEX_DIRECT', '1')
+        put('SOTC_TEX_GATHER', '1')
+    if s.get('button_icons') == 'xbox' and (PORT / 'glyphs' / 'xbox').is_dir():
+        put('SOTC_TEX_REPLACE', str(PORT / 'glyphs' / 'xbox'))
+    put('SOTC_UI_LANG', str(s.get('ui_language') or desktop_language()))  # in-game menu, F7/F8 texts
+    # The game renders at the output size (720p at 1080p, as on PS4); the PS4 Pro path keeps its own
+    # sizes. DLSS / FSR 4 render smaller and upscale.
+    output = env['SOTC_OUTPUT_RES']
+    upscaler = str(s.get('upscaler') or 'fsr1')
+    if 'SOTC_RENDER_RES' not in env and not neo:
+        if upscaler in ('dlss', 'fsr4'):
+            env['SOTC_RENDER_RES'] = dlss_render(output, s.get('dlss_mode'))
+        elif output not in ('1280x720', '1920x1080'):
+            env['SOTC_RENDER_RES'] = output
+    # FSR 1 stays the upscaler of frames without the game's scene (menus) and the fallback of DLSS.
+    put('BB_FSR1', '1' if upscaler in ('fsr1', 'dlss', 'fsr4') else '0')
+    if upscaler in ('dlss', 'fsr4'):
+        put('SOTC_UPSCALER', upscaler)
+        put('SOTC_DLSS_SHARPEN', str(s.get('dlss_sharpen') or '0'))
+        put('SOTC_DLSS_UI_SHARPEN', str(s.get('dlss_ui_sharpen') or '3'))
+        put('SOTC_DLSS_SKY_SHARPEN', str(s.get('dlss_sky_sharpen') or '2'))
+        if s.get('dlss_compare'):
+            put('SOTC_DLSS_COMPARE', '1')
+    if s.get('hdr_sdr'):
+        put('SOTC_HDR', '1')  # upstream's SDR-to-HDR10 output; 'hdr' (SOTC_MODES) is the game's own
+    if s.get('sharpness') == 'off':
+        put('BB_RCAS', '0')
+    else:
+        put('BB_RCAS', '1')
+        put('BB_RCAS_ATTENUATION', str(s.get('sharpness') or '250'))
+    put('SOTC_MOUSE', '1' if s.get('mouse', True) else '0')
+    put('SOTC_MOUSE_SENS', str(s.get('mouse_sens') or '1.0'))
+    put('SOTC_MOUSE_INVERT', '1' if s.get('mouse_invert') else '0')
+    # Hot readbacks (buffer_cache.cpp GatherDownloads): ~25% more FPS at the Shrine.
+    put('SOTC_RB_HOT', '1' if s.get('rb_hot', True) else '0')
+    if s.get('debug_menu'):
+        put('SOTC_DEBUG_MENU', '1')  # Bluepoint's debug menu
+    if s.get('debug_watch'):
+        put('SOTC_POOL_WATCH', '1')  # the texture memory watch, for bug reports
+    if str(s.get('gamepad') or '').strip():
+        put('BB_GAMEPAD', str(s['gamepad']).strip())
+    if not s.get('rumble', True):
+        put('SOTC_RUMBLE', '0')
 
 
 def fingerprint(game, modules):
@@ -179,11 +572,16 @@ def main():
         run_script('sotc_cpu.py', source, '--out', out)
         stamp.write_text(wanted + '\n')
 
+    # The start-up settings (<user>/settings.json, the in-game menu's), below what the environment
+    # and sotc.ini set.
+    version = port_version()
+    user = Path(env.get('SOTC_USER_DIR', DATA / 'user')).resolve()
+    user.mkdir(parents=True, exist_ok=True)
+    settings_file = user / 'settings.json'
+    settings_env(env, load_settings(settings_file, version), settings_file, source)
+    check_shader_cache(user, version)
     modes = env.get('SOTC_MODES', '')
-    cvars = env.get('SOTC_CVARS')
-    if cvars is None:
-        # The culling settings of Pink-shadPS4 (same image, fewer GPU waits).
-        cvars = 'doIndexBufferCulling=0 doSunShadowIndexBufferCulling=0'
+    cvars = env.get('SOTC_CVARS', '')
     if env.get('SOTC_NOTE'):
         print(f"sotc: {env['SOTC_NOTE']}", file=sys.stderr)
     render = env.get('SOTC_RENDER_RES', '').strip()
@@ -223,12 +621,8 @@ def main():
         env.setdefault('BB_HDR', '1')
 
     probe = find_probe()
-    # The port's version (VERSION), for the window title and the in-game menu.
-    version = PORT / 'VERSION'
-    if version.is_file():
-        env.setdefault('SOTC_PORT_VERSION', version.read_text().strip())
-    user = Path(env.get('SOTC_USER_DIR', DATA / 'user')).resolve()
-    user.mkdir(parents=True, exist_ok=True)
+    if version:
+        env.setdefault('SOTC_PORT_VERSION', version)  # window title, in-game menu
     env.setdefault('BB_GPU_USER_DIR', str(user))
     # Controls: key.<input>= / pad.<input>= lines of sotc.ini remap keys and buttons (src/runtime_pad.c).
     env.setdefault('BB_CONFIG', str(DATA / 'sotc.ini'))

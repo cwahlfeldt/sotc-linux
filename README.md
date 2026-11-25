@@ -91,11 +91,11 @@ the menu is open; **Esc** or F1 closes it.
 - **Display:** fullscreen, FPS counter.
 - **Camera & mouse:** mouse camera on/off, sensitivity, invert Y.
 - The header shows FPS, frame time, the GPU and its video memory in use.
-- **What is kept for the next start:** only the GPU library's own settings, which the menu writes
-  at the end of `sotc.ini`. Keeping the rest (FPS mode, texture quality, frame generation, volume,
-  and the ◆ settings that only apply at start) was the old Windows launcher's job, so for now they
-  last until the game closes; set start-up options in `sotc.ini` instead (`SOTC_MODES` for 60 FPS
-  and 16x AF, the game folder, ...; all listed in `sotc.py`).
+- **What is kept for the next start:** everything. The menu saves FPS mode, texture quality,
+  frame generation, volume and the ◆ settings (those apply at the next start) in
+  `user/settings.json`, and the GPU library's own settings at the end of `sotc.ini`. A variable you
+  set yourself in `sotc.ini` (`SOTC_MODES`, `SOTC_FPS_CAP`, ...; all listed in `sotc.py`) wins
+  over `user/settings.json`.
 
 | Key | What it does |
 |---|---|
@@ -166,8 +166,10 @@ The patch modes (60 FPS, 16x filtering) apply to EU 1.01 and US 1.00 (the same e
 other versions run at 30 FPS. Each release keeps its own saves (`user/savedata/1/<title ID>`),
 and only DLC of the same region is used.
 
-Settings are environment variables or `NAME=value` lines in `sotc.ini` (all of them are listed at
-the top of `sotc.py`): e.g. `SOTC_MODES=fps60,af16` for 60 FPS and 16x filtering,
+The in-game menu's choices are kept in `user/settings.json`, with the defaults the Windows
+releases used (16x filtering, high quality textures, skipped logos, ...). Settings are also
+environment variables or `NAME=value` lines in `sotc.ini`, which win over the file (all of them are
+listed at the top of `sotc.py`): e.g. `SOTC_MODES=fps60,af16` for 60 FPS and 16x filtering,
 `SOTC_SYS_MODULES=/folder/with/the/sprx` for the console's sound modules. Controller support
 (DualShock 4, DualSense, Xbox) with mouse camera and key remapping
 ([docs/sotc/README-SotC.md](docs/sotc/README-SotC.md)). The session log is `user/last_run.log`.

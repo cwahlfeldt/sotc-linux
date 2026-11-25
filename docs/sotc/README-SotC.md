@@ -33,8 +33,10 @@ Na primeira vez a imagem do jogo é preparada, o que leva alguns segundos. Isso 
 quando o jogo ou os módulos mudam. Os saves e o cache de shaders ficam em `user/`, o registro da
 sessão em `user/last_run.log`.
 
-As opções são variáveis de ambiente ou linhas `NOME=valor` no `sotc.ini`; a lista completa está
-no começo do `sotc.py`.
+O que se muda no menu do jogo (F1) fica guardado em `user/settings.json` e vale na próxima
+abertura, com os mesmos padrões das versões para Windows (filtro 16x, texturas altas, sem os
+logos...). As opções também podem ser variáveis de ambiente ou linhas `NOME=valor` no `sotc.ini`,
+que valem mais que o arquivo; a lista completa está no começo do `sotc.py`.
 
 ## Imagem e desempenho
 

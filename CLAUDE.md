@@ -105,7 +105,10 @@ resolve against bb-probe):
   and SIGSEGV).
 
 **Behaviour switches** are environment variables (`BB_*` inherited from bbport, `SOTC_*` added
-here), set in the environment or `sotc.ini`. Diagnostic ones are listed in `docs/sotc/README-SotC.md`;
+here), set in the environment or `sotc.ini`. Below those, `sotc.py` turns `<user>/settings.json`
+(the start-up settings the Windows launcher used to keep: `SETTINGS_DEFAULTS`, `settings_env`, a
+port of its `game_environment`) into variables with `setdefault`; the in-game menu writes that file
+through `SOTC_LAUNCHER_SETTINGS`. Diagnostic ones are listed in `docs/sotc/README-SotC.md`;
 newer ones appear in `CHANGELOG.md` entries. Session log goes to `user/last_run.log`.
 
 ## Known pitfalls
@@ -134,11 +137,12 @@ newer ones appear in `CHANGELOG.md` entries. Session log goes to `user/last_run.
 - A release bumps `VERSION` (sotc.py passes it to the game as `SOTC_PORT_VERSION`: window title,
   in-game menu), the version/table in `README.md` (both languages), and adds a Portuguese
   `CHANGELOG.md` entry.
-- User rule: an update turns all its improvements on automatically. The removed Windows launcher
-  did it with `DEFAULT_UPGRADES`; on Linux the in-game menu saves its settings into `sotc.ini`, so a
-  default changed for the better must not be held back by an old saved value (there is no upgrade
-  mechanism for that yet).
-- Changes to recompiler/shader output invalidate the user's shader cache; CHANGELOG entries note
-  "O cache de shaders é refeito na primeira abertura" when that happens.
+- **Every default changed for the better goes into `DEFAULT_UPGRADES`** (`sotc.py`, by version):
+  settings saved by an older version keep their old value otherwise. `load_settings` applies each
+  entry once, when `<user>/settings.json` was saved by an older `settings_version`. User rule: an
+  update turns all its improvements on automatically.
+- Changes to recompiler/shader output make the user's shader cache wrong: bump
+  `SHADER_CACHE_VERSION` in `sotc.py` (the next start clears the cache once, `check_shader_cache`),
+  and the CHANGELOG entry notes "O cache de shaders é refeito na primeira abertura".
 - C code: C11, `-Wall -Wextra -Werror`; third-party decoders (LibAtrac9) are compiled separately
   without `-Werror`.
