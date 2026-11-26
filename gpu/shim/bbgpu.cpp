@@ -424,8 +424,22 @@ extern "C" int bbgpu_init(const BbGpuConfig* config) {
             g_window_ready = true;
         }
         g_window_cv.notify_all();
+        // sotc: input reaches the game as the state of the last event pump (runtime_pad.c samples
+        // SDL's gamepad and keyboard state, the mouse motion collected here). After a fixed
+        // SDL_Delay(2) a key, click, mouse move or stick change waited up to ~2 ms (plus timer
+        // slack) to be seen. Waiting for the next event instead wakes the thread as soon as one
+        // arrives (SDL keeps polling an open gamepad meanwhile), still at least every 2 ms for
+        // the work that has no event (menu capture, the title). SOTC_INPUT_WAIT=0: the fixed delay.
+        static const bool wait_for_events = [] {
+            const char* v = std::getenv("SOTC_INPUT_WAIT");
+            return !(v && v[0] == '0');
+        }();
         while (window->PollEvents()) {
-            SDL_Delay(2);
+            if (wait_for_events) {
+                SDL_WaitEventTimeout(nullptr, 2); // the event stays queued for PollEvents
+            } else {
+                SDL_Delay(2);
+            }
         }
         LOG_INFO(Frontend, "Window closed by user");
         // sotc: a save being written (a save directory mounted for writing) gets up to 5 s to
