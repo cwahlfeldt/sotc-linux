@@ -25,6 +25,7 @@
 #include "bbport_mem_report.h"
 #include "bbport_overlay.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
+#include "video_core/renderer_vulkan/sotc_display.h"
 #include "video_core/renderer_vulkan/sotc_gpu_times.h"
 #include "video_core/sotc_fps_cap.h"
 #include "video_core/sotc_event.h"
@@ -1488,6 +1489,18 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
         return requests.front().arrival;
     };
 
+    // sotc: SOTC_DISPLAY_LOCK (sotc_display.h): when the last flip went out, and a locked flip
+    // due before the next tick waits for its exact time (the ticks are ~1 ms apart).
+    auto last_release_time = last_flip_time;
+    const auto wait_locked = [&](std::chrono::steady_clock::time_point due,
+                                 std::chrono::steady_clock::time_point& now) {
+        if (now < due && due - now < tick_period) {
+            std::this_thread::sleep_until(due);
+            now = std::chrono::steady_clock::now();
+        }
+        return now >= due;
+    };
+
     while (!token.stop_requested()) {
         timer.Start();
 
@@ -1499,6 +1512,15 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
             timer.End();
             continue;
         }
+
+        // sotc: SotcDisplay (sotc_display.h): when the frames reached the screen, polled by the
+        // thread that presents: this one, unless the presenter thread does (FSR 3 frame
+        // generation; it polls at each of its presents and the flips are not locked).
+        const bool presents_here = !AsyncPresent();
+        if (presents_here) {
+            presenter->PollDisplay();
+        }
+        bool flip_locked = false, flip_on_time = false;
 
         // Check if it's time to take a request.
         // sotc: the flip rate counts from the last flip instead of fixed vblank phases: at 30 fps
@@ -1531,20 +1553,34 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
             if (limit_vblanks != 0 && !paced) {
                 take_request = vblank_status.count - last_flip_vblank >= limit_vblanks;
             } else if (limit_vblanks != 0) {
-                const auto now = std::chrono::steady_clock::now();
+                auto now = std::chrono::steady_clock::now();
                 const auto arrival = peek_arrival();
-                take_request = arrival && now + tick_period / 2 >= limit_next &&
-                               (now + tick_period / 2 >= last_flip_time + arrival_ema ||
+                // sotc: the dynamic FPS step at its exact period (48 on a 144 Hz screen is not
+                // a whole number of 120 Hz vblanks).
+                const int dyn = SotcFpsCap::dynamic_limit.load(std::memory_order_relaxed);
+                const std::chrono::nanoseconds limit_period =
+                    dyn > 0 && limit_vblanks == vblanks_for(dyn / 100)
+                        ? std::chrono::nanoseconds{100'000'000'000LL / dyn}
+                        : std::chrono::duration_cast<std::chrono::nanoseconds>(
+                              vblank_period * limit_vblanks);
+                const bool game_ready =
+                    arrival && (now + tick_period / 2 >= last_flip_time + arrival_ema ||
                                 now >= *arrival + vblank_period);
+                // sotc: SOTC_DISPLAY_LOCK: the limit as a whole number of the screen's real
+                // refreshes, each flip released where it comes out on the same refresh (instead
+                // of the port's own clock, which drifts against the screen's).
+                const auto locked =
+                    presents_here
+                        ? Vulkan::SotcDisplay::LockedDue(limit_period, last_release_time)
+                        : std::nullopt;
+                if (locked) {
+                    take_request = game_ready && wait_locked(*locked, now);
+                    flip_locked = true;
+                    flip_on_time = take_request && now - *locked < std::chrono::microseconds{500};
+                } else {
+                    take_request = game_ready && now + tick_period / 2 >= limit_next;
+                }
                 if (take_request) {
-                    // sotc: the dynamic FPS step at its exact period (48 on a 144 Hz screen is not
-                    // a whole number of 120 Hz vblanks).
-                    const int dyn = SotcFpsCap::dynamic_limit.load(std::memory_order_relaxed);
-                    const std::chrono::nanoseconds limit_period =
-                        dyn > 0 && limit_vblanks == vblanks_for(dyn / 100)
-                            ? std::chrono::nanoseconds{100'000'000'000LL / dyn}
-                            : std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                  vblank_period * limit_vblanks);
                     limit_next = (now - limit_next < tick_period ? limit_next : now) + limit_period;
                 }
             } else if (!paced) {
@@ -1558,7 +1594,23 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
             }
         } else {
             const u64 interval = u64(flip_rate + 1) * vblanks_per_60hz;
-            take_request = vblank_status.count - last_flip_vblank >= interval;
+            // sotc: SOTC_DISPLAY_LOCK: the game's rate (the 30 FPS cap) locked to the screen's
+            // refreshes the same way (33.3 ms = 8 refreshes at 240 Hz, 2 at 60 Hz).
+            const auto locked =
+                presents_here
+                    ? Vulkan::SotcDisplay::LockedDue(
+                          std::chrono::duration_cast<std::chrono::nanoseconds>(vblank_period *
+                                                                               interval),
+                          last_release_time)
+                    : std::nullopt;
+            if (locked) {
+                auto now = std::chrono::steady_clock::now();
+                take_request = peek_arrival().has_value() && wait_locked(*locked, now);
+                flip_locked = true;
+                flip_on_time = take_request && now - *locked < std::chrono::microseconds{500};
+            } else {
+                take_request = vblank_status.count - last_flip_vblank >= interval;
+            }
         }
         const auto request = take_request ? receive_request() : Request{};
         if (!request) {
@@ -1573,6 +1625,11 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
             }
         } else {
             last_flip_count = vblank_status.count;
+            // sotc: SotcDisplay: when this flip went out, and whether at its locked time.
+            last_release_time = std::chrono::steady_clock::now();
+            if (presents_here) {
+                Vulkan::SotcDisplay::NoteFlip(last_release_time, flip_locked, flip_on_time);
+            }
             Flip(request);
             last_flip_vblank = vblank_status.count;
             last_flip_time = std::chrono::steady_clock::now();
