@@ -14,6 +14,7 @@
 #include <sys/time.h>
 #include <x86intrin.h>
 #ifndef _WIN32
+#include <cpuid.h>
 #include <sys/random.h>
 #include <sys/resource.h>
 #endif
@@ -96,23 +97,104 @@ static uint64_t host_tsc(void) {
     return __rdtsc();
 }
 static ABI uint64_t read_tsc(void) { return host_tsc(); }
+/* sotc: the engine times itself with inline rdtsc divided by this frequency (probe.c,
+ * choose_tsc), so the value is the game's clock rate for the whole session: 1% off and the
+ * simulation, animations and timers run 1% fast or slow against the sound. It used to be taken
+ * against CLOCK_MONOTONIC over one 20 ms sleep, with a clock read and an rdtsc at each end: an
+ * interrupt or preemption between the two reads was counted as elapsed time, threads asking at
+ * once each measured (and kept) their own value, and while NTP slews the clock to correct an
+ * offset CLOCK_MONOTONIC runs fast or slow (chrony slews up to 8.3% by default, right after
+ * boot). Now it is measured once for the process, each end point bracketed by two TSC reads (the
+ * tightest of 16 tries), against both CLOCK_MONOTONIC (NTP's steady frequency correction
+ * included: real time, the clock of sceKernelGetProcessTime) and CLOCK_MONOTONIC_RAW (the
+ * kernel's own TSC calibration, never slewed). The first is kept unless they differ by more than
+ * TSC_SLEW_PPM (a crystal is off by less; only a slew in progress goes past it), then the raw one.
+ * SOTC_TSC_HZ=<Hz> sets the frequency instead (tests). */
+#define TSC_CALIBRATION_NS 20000000L
+#define TSC_SLEW_PPM 500.0
 static uint64_t tsc_hz;
+#ifndef _WIN32
+static pthread_once_t tsc_once=PTHREAD_ONCE_INIT;
+/* One (TSC, ns) pair: the clock read between two TSC reads, the tightest of 16 tries (0: the
+ * clock cannot be read). */
+static int tsc_clock_pair(clockid_t clock,uint64_t *tsc,uint64_t *ns) {
+    uint64_t best=UINT64_MAX;
+    for (int i=0;i<16;++i) {
+        struct timespec t;
+        _mm_lfence(); const uint64_t before=__rdtsc(); _mm_lfence();
+        if (clock_gettime(clock,&t)) return 0;
+        _mm_lfence(); const uint64_t after=__rdtsc(); _mm_lfence();
+        if (after-before<best) {
+            best=after-before;
+            *tsc=before+(after-before)/2;
+            *ns=(uint64_t)t.tv_sec*1000000000u+(uint64_t)t.tv_nsec;
+        }
+    }
+    return 1;
+}
+/* TSC ticks per second between two pairs of one clock (0 when unusable). */
+static uint64_t tsc_rate(uint64_t tsc0,uint64_t ns0,uint64_t tsc1,uint64_t ns1) {
+    if (ns1<=ns0 || tsc1<=tsc0) return 0;
+    return (tsc1-tsc0)*1000000000u/(ns1-ns0); /* < 2^64 for any TSC below 900 GHz over 20 ms */
+}
+/* The game reads the TSC itself: on a kernel that found it unsteady (another clock source) or a
+ * CPU without an invariant TSC, its timers may jump between cores. Said once, in the log. */
+static void tsc_check_source(void) {
+    char source[64]={0};
+    FILE *f=fopen("/sys/devices/system/clocksource/clocksource0/current_clocksource","r");
+    if (f) { if (!fgets(source,sizeof(source),f)) source[0]=0; fclose(f); }
+    source[strcspn(source,"\r\n")]=0;
+    unsigned a=0,b=0,c=0,d=0;
+    const int invariant=__get_cpuid(0x80000007,&a,&b,&c,&d) && (d & (1u<<8));
+    if ((source[0] && strcmp(source,"tsc")) || !invariant)
+        printf("Runtime: warning: the kernel's clock source is \"%s\"%s; the game times itself with the TSC, "
+               "which may then differ between cores (hitches, timers jumping)\n",
+               source[0] ? source : "unknown",invariant ? "" : " and the CPU has no invariant TSC");
+}
+static void tsc_measure(void) {
+    const char *forced=getenv("SOTC_TSC_HZ");
+    if (forced && *forced) {
+        const unsigned long long hz=strtoull(forced,NULL,10);
+        if (hz>=100000000ull) {
+            tsc_hz=hz;
+            printf("Runtime: TSC frequency %.6f MHz (SOTC_TSC_HZ)\n",(double)hz/1e6);
+            return;
+        }
+        fprintf(stderr,"Runtime: SOTC_TSC_HZ=%s ignored (below 100 MHz)\n",forced);
+    }
+    uint64_t m_tsc[2]={0,0},m_ns[2]={0,0},r_tsc[2]={0,0},r_ns[2]={0,0};
+    int raw_ok=tsc_clock_pair(CLOCK_MONOTONIC_RAW,&r_tsc[0],&r_ns[0]);
+    tsc_clock_pair(CLOCK_MONOTONIC,&m_tsc[0],&m_ns[0]);
+    struct timespec nap={0,TSC_CALIBRATION_NS};
+    while (nanosleep(&nap,&nap) && errno==EINTR) {}
+    tsc_clock_pair(CLOCK_MONOTONIC,&m_tsc[1],&m_ns[1]);
+    raw_ok=raw_ok && tsc_clock_pair(CLOCK_MONOTONIC_RAW,&r_tsc[1],&r_ns[1]);
+    const uint64_t real=tsc_rate(m_tsc[0],m_ns[0],m_tsc[1],m_ns[1]);
+    const uint64_t raw=raw_ok ? tsc_rate(r_tsc[0],r_ns[0],r_tsc[1],r_ns[1]) : 0;
+    const double ppm=real && raw ? ((double)real-(double)raw)/(double)raw*1e6 : 0.0;
+    const int slewing=raw && (!real || ppm>TSC_SLEW_PPM || ppm<-TSC_SLEW_PPM);
+    tsc_hz=slewing ? raw : real;
+    if (!tsc_hz) { fputs("STOP: the TSC frequency cannot be measured\n",stderr); exit(21); }
+    printf("Runtime: TSC frequency %.6f MHz (from %s; CLOCK_MONOTONIC_RAW gives %+.1f ppm)%s\n",(double)tsc_hz/1e6,
+           slewing ? "CLOCK_MONOTONIC_RAW" : "CLOCK_MONOTONIC",-ppm,
+           slewing ? ": the system clock is being slewed, its rate is not used" : "");
+    tsc_check_source();
+}
+#endif
 static ABI uint64_t tsc_frequency(void) {
 #ifdef _WIN32
     if (tsc_from_qpc) return compat_qpc_tsc_frequency();
-#endif
     if (!tsc_hz) {
-        struct timespec a,b,nap={0,20000000};
+        struct timespec a,b;
         clock_gettime(CLOCK_MONOTONIC,&a); uint64_t t0=__rdtsc();
-#ifdef _WIN32
-        (void)nap; compat_sleep_ns(20000000);
-#else
-        nanosleep(&nap,NULL);
-#endif
+        compat_sleep_ns(TSC_CALIBRATION_NS);
         clock_gettime(CLOCK_MONOTONIC,&b); uint64_t t1=__rdtsc();
         uint64_t ns=(uint64_t)(b.tv_sec-a.tv_sec)*1000000000+(uint64_t)(b.tv_nsec-a.tv_nsec);
         tsc_hz=(t1-t0)*1000000000/(ns ? ns : 1);
     }
+#else
+    pthread_once(&tsc_once,tsc_measure);
+#endif
     return tsc_hz;
 }
 /* Shared with the GPU library so flip/label timestamps use the guest's clock. */
