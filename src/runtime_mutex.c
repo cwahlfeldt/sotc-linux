@@ -134,11 +134,49 @@ static uint64_t mutex_spin_us_get(void) {
     __atomic_store_n(&mutex_spin_us_cfg, us, __ATOMIC_RELEASE);
     return us;
 }
+/* sotc: the spin reads the lock word and calls trylock only when the mutex looks free (test and
+ * test-and-set), with the pause between looks doubling up to MUTEX_SPIN_MAX_PAUSES. Every
+ * trylock is a locked compare-and-swap that takes the mutex's cache line for itself even when it
+ * fails: at the temple (26 Nov, 21:9, 60 FPS mode) the game's four job workers spent ~25% of their
+ * time in failing trylocks of this loop and ~24% in the pause between them, taking the line from
+ * the owner that must write it to unlock, on the P-cores the GPU threads share. Reading keeps the
+ * line shared until it is released. Measured on 4 workers relocking one mutex in a loop while
+ * another thread needs it every 50 us (the job loop and a thread pushing a job; i5-13600KF):
+ * that thread's wait for the lock 6-10 us -> 1.3-1.6 us on average, 24-33 us -> 7-9 us at the
+ * 99th percentile. The pause doubles only up to 8: at 32 the waits were longer at the 99th
+ * percentile (14-18 us), a waiter checking that seldom missed the moments it was free.
+ * SOTC_MUTEX_SPIN_READ=0: a trylock at every pause, as before. glibc only (the lock word's
+ * layout); elsewhere the old loop. */
+#define MUTEX_SPIN_MAX_PAUSES 8u
+static int mutex_spin_read_cfg = -1; /* accessed with __atomic */
+static int mutex_spin_read(void) {
+    int v = __atomic_load_n(&mutex_spin_read_cfg, __ATOMIC_RELAXED);
+    if (v < 0) {
+        const char *env = getenv("SOTC_MUTEX_SPIN_READ");
+        v = !(env && env[0] == '0');
+        __atomic_store_n(&mutex_spin_read_cfg, v, __ATOMIC_RELAXED);
+    }
+    return v;
+}
 /* Returns 0 when the spin got the lock, EBUSY (or another host error) when the caller must wait. */
 static int mutex_spin(GuestMutex *m, uint64_t us) {
     const uint64_t limit = us * __atomic_load_n(&mutex_spin_hz_cfg, __ATOMIC_RELAXED) / 1000000;
     const uint64_t t0 = spin_now();
     int native = EBUSY;
+#if defined(__GLIBC__)
+    if (mutex_spin_read()) {
+        unsigned pauses = 1;
+        do {
+            for (unsigned i = 0; i < pauses; ++i) spin_relax();
+            if (__atomic_load_n(&m->native.__data.__lock, __ATOMIC_RELAXED) == 0) {
+                native = pthread_mutex_trylock(&m->native);
+                if (native != EBUSY) return native;
+            }
+            if (pauses < MUTEX_SPIN_MAX_PAUSES) pauses <<= 1;
+        } while (spin_now() - t0 < limit);
+        return native;
+    }
+#endif
     do {
         for (int i = 0; i < 16 && native == EBUSY; ++i) {
             spin_relax();

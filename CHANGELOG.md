@@ -48,6 +48,13 @@
   locks queued behind each other); guest mutexes no longer make a `gettid` system call while
   held; the lock counters no longer share one cache line between all threads. Same error codes
   as before.
+- 🔒 **The game's job workers no longer fight over their locks' cache lines**: at the temple
+  (21:9, 60 FPS) a profile of the game's four job workers had about half of their time in the
+  port's mutex spin, with a compare-and-swap at every pause taking the lock's cache line from the
+  thread that held it. The spin now only reads the lock until it looks free, with a short backoff.
+  In a model of the job loop (4 workers relocking, a thread pushing a job every 50 µs) the pushing
+  thread's wait for the lock went from 6–10 µs to 1.3–1.6 µs on average (99th percentile 24–33 →
+  7–9 µs). `SOTC_MUTEX_SPIN_READ=0` restores the old spin.
 - 🔊 **Sound threads first, as the game asks**: the threads the game runs at the top PS4
   priority (`sndx_*`, `SoundSystemSndx`) run 6 nice levels above the rest where `RLIMIT_NICE`
   allows. On 4 CPU threads or fewer the Windows rule (#267) now applies on Linux too: job workers
