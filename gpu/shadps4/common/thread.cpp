@@ -30,6 +30,15 @@
 #ifndef _WIN32
 #include <unistd.h>
 #endif
+#ifdef __linux__
+// sotc: SetCurrentThreadRealtime (timer slack, nice level).
+#include <algorithm>
+#include <cerrno>
+#include <cstdio>
+#include <cstdlib>
+#include <sys/prctl.h>
+#include <sys/resource.h>
+#endif
 
 #ifdef __FreeBSD__
 #define cpu_set_t cpuset_t
@@ -69,6 +78,67 @@ void SetCurrentThreadRealtime(const std::chrono::nanoseconds period_ns) {
         LOG_ERROR(Common, "Could not set thread to real-time with period {} ns: {}",
                   period_ns.count(), ret);
     }
+}
+
+#elif defined(__linux__)
+
+// sotc (Linux): this was a no-op, so the threads that time presentation (the present thread:
+// the guest's vblanks and every flip, on a ~1 ms tick; the presenter thread: FSR 3 frame
+// generation's half-frame wait) ran as ordinary threads. Each nanosleep overslept by the default
+// 50 us timer slack, and with the game's job workers and the GPU threads busy on every core, a
+// woken tick could wait most of a scheduler slice (several ms with many CPUs) before it ran: a
+// flip released late, a vblank the game saw late, a generated frame left on screen too long.
+// The calling thread now sleeps with a 1 ns timer slack and runs at nice SOTC_PRESENT_NICE
+// (default -10). It sleeps most of the time, so the weight takes nothing from the game in steady
+// state; it only lets the thread preempt on wakeup. The level is what RLIMIT_NICE (or
+// CAP_SYS_NICE) allows, nothing when neither does; SOTC_PRESENT_NICE=0 leaves the thread as it
+// was (timer slack included). SCHED_FIFO is not used: the present thread records and submits
+// Vulkan work, which a real-time policy could let starve the rest of its core.
+void SetCurrentThreadRealtime(const std::chrono::nanoseconds period_ns) {
+    (void)period_ns;
+    static const int want = [] {
+        const char* v = std::getenv("SOTC_PRESENT_NICE");
+        const long n = v && *v ? std::strtol(v, nullptr, 10) : -10;
+        return static_cast<int>(std::clamp(n, -20L, 0L));
+    }();
+    if (want == 0) {
+        return;
+    }
+    prctl(PR_SET_TIMERSLACK, 1UL, 0UL, 0UL, 0UL);
+    const id_t tid = static_cast<id_t>(gettid());
+    errno = 0;
+    const int before = getpriority(PRIO_PROCESS, tid);
+    if (errno != 0) {
+        return;
+    }
+    if (before == 0) {
+        // Threads this one creates later (the presenter, FSR 3 or Streamline helpers) start at
+        // nice 0, the level they had before, instead of inheriting the boost. The call keeps this
+        // thread's own nice level. (At another starting level, reset-on-fork would move them to 0.)
+        const sched_param normal{};
+        sched_setscheduler(0, SCHED_OTHER | SCHED_RESET_ON_FORK, &normal);
+    }
+    int now = before;
+    if (want < before) {
+        if (setpriority(PRIO_PROCESS, tid, want) == 0) {
+            now = want;
+        } else {
+            // Unprivileged: as far down as RLIMIT_NICE lets it (its ceiling is 20 - rlim_cur).
+            rlimit limit{};
+            if (getrlimit(RLIMIT_NICE, &limit) == 0) {
+                const long cur = limit.rlim_cur == RLIM_INFINITY ? 40L
+                                                                 : static_cast<long>(limit.rlim_cur);
+                const int floor = static_cast<int>(20L - std::clamp(cur, 1L, 40L));
+                if (floor > want && floor < before && setpriority(PRIO_PROCESS, tid, floor) == 0) {
+                    now = floor;
+                }
+            }
+        }
+    }
+    char name[16] = {};
+    pthread_getname_np(pthread_self(), name, sizeof(name));
+    std::fprintf(stderr, "SOTC THREAD %s: timer slack 1 ns, nice %d%s (SOTC_PRESENT_NICE=%d)\n",
+                 name, now, now == want ? "" : " (as far as RLIMIT_NICE allows)", want);
 }
 
 #else

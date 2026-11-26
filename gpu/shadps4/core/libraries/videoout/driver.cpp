@@ -334,6 +334,11 @@ void VideoOutDriver::RunPresentJob(std::function<void()> job, bool droppable) {
 
 void VideoOutDriver::PresentJobThread(std::stop_token token) {
     Common::SetCurrentThreadName("shadPS4:Presenter");
+    // sotc: FSR 3 frame generation times the game frame half an interval after the generated one
+    // here (FsrFg::SleepUntil): a late wakeup leaves the generated frame on screen too long. The
+    // same timer slack and priority as the present thread (common/thread.cpp, Linux).
+    Common::SetCurrentThreadRealtime(std::chrono::nanoseconds{
+        1'000'000'000 / std::max<u32>(1, EmulatorSettings.GetVblankFrequency())});
     while (!token.stop_requested()) {
         std::function<void()> job;
         {
