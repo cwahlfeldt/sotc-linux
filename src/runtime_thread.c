@@ -20,6 +20,7 @@
 #else
 #include <sys/syscall.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <asm/prctl.h>
 #include <signal.h>
 #endif
@@ -327,6 +328,76 @@ static void set_host_name(const char *name) {
     }
 #endif
 }
+#ifndef _WIN32
+/* sotc (Linux): the guest's thread priorities were recorded and never applied, and the Windows
+ * rule below (#267) had no Linux side. As nice levels of the thread, relative to the process's
+ * own (nice 0 normally; a game started with `nice -n 5` keeps the spacing):
+ *   - the sound threads (what the game itself asks to run first: the sndx_* threads at PS4
+ *     priority 256-258, and SoundSystemSndx) 6 levels up on any CPU: they mix and feed the audio
+ *     device in short bursts, and one that waits behind the busy job workers is an audible gap;
+ *   - on 4 CPU threads or fewer, as on Windows: the job workers (busy-wait style) 4 levels down,
+ *     the file and loading threads 2 levels up.
+ * Lowering a thread's priority is always allowed; raising one goes as far as
+ * RLIMIT_NICE (or CAP_SYS_NICE) allows and otherwise stays where it is. SOTC_JOB_PRIORITY=0 turns
+ * all of it off, =2 applies the small-CPU rule on any CPU. */
+enum { NICE_SOUND=-6, NICE_FILES=-2, NICE_WORKERS=4 };
+static int priority_mode=1;
+static unsigned priority_cpus;
+static int priority_floor; /* the lowest nice level this process may set */
+static int base_nice;      /* the process's nice level at start (the main thread's) */
+static pthread_once_t priority_once=PTHREAD_ONCE_INIT;
+__attribute__((constructor)) static void remember_base_nice(void) {
+    errno=0;
+    const int n=getpriority(PRIO_PROCESS,0); /* 0: the calling thread, here the main thread */
+    base_nice=errno ? 0 : n;
+}
+static void priority_setup(void) {
+    const char *v=getenv("SOTC_JOB_PRIORITY");
+    if (v && *v) priority_mode=v[0]=='0' ? 0 : v[0]=='2' ? 2 : 1;
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    priority_cpus=sched_getaffinity(0,sizeof(set),&set)==0 ? (unsigned)CPU_COUNT(&set) : 0;
+    if (!priority_cpus) { const long n=sysconf(_SC_NPROCESSORS_ONLN); priority_cpus=n>0 ? (unsigned)n : 1; }
+    struct rlimit limit;
+    priority_floor=0;
+    if (getrlimit(RLIMIT_NICE,&limit)==0) {
+        const long cur=limit.rlim_cur==RLIM_INFINITY ? 40 : (long)limit.rlim_cur;
+        priority_floor=(int)(20-(cur<1 ? 1 : cur>40 ? 40 : cur));
+        if (priority_floor>0) priority_floor=0;
+    }
+}
+/* The thread's nice level as close to `want` as allowed; returns the level it has. With the
+ * process at nice 0, a raised thread is marked reset-on-fork, so threads it creates start at 0
+ * (the process's level) instead of inheriting the raise. */
+static int apply_nice(int want) {
+    const id_t tid=(id_t)gettid();
+    errno=0;
+    const int now=getpriority(PRIO_PROCESS,tid);
+    if (errno || want==now) return now;
+    if (want<0 && base_nice==0) {
+        const struct sched_param normal={0};
+        sched_setscheduler(0,SCHED_OTHER|SCHED_RESET_ON_FORK,&normal); /* keeps the nice level */
+    }
+    if (!setpriority(PRIO_PROCESS,tid,want)) return want;
+    const int floor=priority_floor;
+    if (want<now && floor>want && floor<now && !setpriority(PRIO_PROCESS,tid,floor)) return floor;
+    return now; /* CAP_SYS_NICE needed (no RLIMIT_NICE headroom) */
+}
+static void apply_guest_priority(const GuestThread *t) {
+    pthread_once(&priority_once,priority_setup);
+    if (!priority_mode) return;
+    const int small=priority_mode==2 || priority_cpus<=4;
+    int offset=0;
+    if (t->attr.prio<400 || strstr(t->name,"Sound") || strstr(t->name,"sndx")) offset=NICE_SOUND;
+    else if (small && !strncmp(t->name,"BPE JobWorker",13)) offset=NICE_WORKERS;
+    else if (small && (!strncmp(t->name,"SceFios",7) || !strcmp(t->name,"Resource Loading"))) offset=NICE_FILES;
+    if (!offset) return;
+    const int want=base_nice+offset<-20 ? -20 : base_nice+offset>19 ? 19 : base_nice+offset;
+    const int got=apply_nice(want);
+    printf("Runtime: guest thread '%s' (prio %d) at nice %d%s\n",t->name,t->attr.prio,got,
+           got==want ? "" : got==base_nice ? " (RLIMIT_NICE allows no higher priority)" : " (as far as RLIMIT_NICE allows)");
+}
+#endif
 #ifdef _WIN32
 #define exit_setjmp(t) bb_setjmp((t)->exit_jump)
 #define exit_longjmp(t) bb_longjmp((t)->exit_jump,1)
@@ -368,6 +439,8 @@ static void *host_start(void *p) {
                 SetThreadPriority(GetCurrentThread(),THREAD_PRIORITY_ABOVE_NORMAL);
         }
     }
+#else
+    apply_guest_priority(t);
 #endif
     if (!exit_setjmp(t)) t->result=t->entry(t->argument);
     runtime_thread_keys_cleanup();
