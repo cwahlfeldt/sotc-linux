@@ -42,3 +42,7 @@ class RuntimeTests(unittest.TestCase):
     def test_rwlock_timeouts_use_orbis_errors(self):
         r=self.run_case('--rwlock-timeouts')
         self.assertEqual(r.returncode,0,r.stdout+r.stderr)
+
+    def test_rwlock_concurrent_use_create_and_destroy(self):
+        r=self.run_case('--rwlock-stress')
+        self.assertEqual(r.returncode,0,r.stdout+r.stderr)

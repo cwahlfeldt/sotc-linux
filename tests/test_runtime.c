@@ -325,6 +325,78 @@ static void rw_timeouts(void) {
     assert(rw_unlock(&f.lock)==0);
     fixture_destroy(&f);
 }
+/* sotc: the lock-free rwlock paths under load: readers and writers of shared locks (a writer's
+ * two-step update is never seen half done, recursive reads and the ownership errors still hold),
+ * a thread that keeps creating and destroying its own locks (slots reused while others run), and
+ * destroys of a lock held for the whole run, which must answer EBUSY every time while the
+ * workers keep taking it (their acquire waits out each destroy's attempt). */
+enum { RW_STRESS_LOCKS=4, RW_STRESS_THREADS=6, RW_STRESS_ROUNDS=40000 };
+typedef struct {
+    void *locks[RW_STRESS_LOCKS], *held;
+    volatile uint64_t first[RW_STRESS_LOCKS], second[RW_STRESS_LOCKS];
+    _Atomic int stop;
+    _Atomic unsigned long busy_destroys;
+} RwStress;
+static void *rw_stress_worker(void *context) {
+    RwStress *s=context;
+    uint32_t seed=(uint32_t)(uintptr_t)&seed;
+    for (int i=0;i<RW_STRESS_ROUNDS;++i) {
+        seed=seed*1664525u+1013904223u;
+        const unsigned k=(seed>>8)%RW_STRESS_LOCKS;
+        if ((seed>>16)%4==0) {
+            assert(rw_write(&s->locks[k])==0);
+            assert((uint32_t)rw_read(&s->locks[k])==0x8002000b);  /* own write lock: EDEADLK */
+            assert((uint32_t)rw_tryread(&s->locks[k])==0x80020010);
+            s->first[k]=s->first[k]+1;
+            __asm__ volatile("" ::: "memory");
+            s->second[k]=s->second[k]+1;
+            assert(rw_unlock(&s->locks[k])==0);
+        } else {
+            assert(rw_read(&s->locks[k])==0);
+            const int nested=(seed>>20)%2;
+            if (nested) assert(rw_read(&s->locks[k])==0);
+            assert((uint32_t)rw_trywrite(&s->locks[k])==0x80020010); /* own read lock */
+            assert(s->first[k]==s->second[k]);
+            if (nested) assert(rw_unlock(&s->locks[k])==0);
+            assert(rw_unlock(&s->locks[k])==0);
+        }
+        assert((uint32_t)rw_unlock(&s->locks[k])==0x80020001); /* nothing held any more */
+        if ((seed>>24)%8==0) assert(rw_read(&s->held)==0 && rw_unlock(&s->held)==0);
+    }
+    return NULL;
+}
+static void *rw_stress_churn(void *context) {
+    RwStress *s=context;
+    MutexInit init=GET(MutexInit,"6ULAa0fq4jA");
+    while (!atomic_load(&s->stop)) {
+        void *mine[3]={NULL,NULL,NULL};
+        assert(init(&mine[0],NULL,"churn")==0 && rw_read(&mine[1])==0 && rw_write(&mine[2])==0);
+        assert(rw_read(&mine[0])==0);
+        assert((uint32_t)rw_destroy(&mine[0])==0x80020010 && (uint32_t)rw_destroy(&mine[2])==0x80020010);
+        assert(rw_unlock(&mine[0])==0 && rw_unlock(&mine[1])==0 && rw_unlock(&mine[2])==0);
+        for (int i=0;i<3;++i) { assert(rw_destroy(&mine[i])==0); assert((uintptr_t)mine[i]==1); }
+        assert((uint32_t)rw_destroy(&s->held)==0x80020010);
+        atomic_fetch_add(&s->busy_destroys,1);
+    }
+    return NULL;
+}
+static void rw_stress(void) {
+    rw_setup();
+    static RwStress s;
+    assert(rw_read(&s.held)==0); /* held by this thread until the workers are done */
+    pthread_t workers[RW_STRESS_THREADS], churn;
+    for (int i=0;i<RW_STRESS_THREADS;++i) assert(pthread_create(&workers[i],NULL,rw_stress_worker,&s)==0);
+    assert(pthread_create(&churn,NULL,rw_stress_churn,&s)==0);
+    for (int i=0;i<RW_STRESS_THREADS;++i) assert(pthread_join(workers[i],NULL)==0);
+    atomic_store(&s.stop,1);
+    assert(pthread_join(churn,NULL)==0);
+    assert(atomic_load(&s.busy_destroys)>0);
+    assert(rw_unlock(&s.held)==0 && rw_destroy(&s.held)==0);
+    for (int k=0;k<RW_STRESS_LOCKS;++k) {
+        assert(s.first[k]==s.second[k]);
+        assert(rw_destroy(&s.locks[k])==0);
+    }
+}
 int main(int argc,char **argv) {
     runtime_start(0); assert(runtime_resolve("bzQExy189ZI",0)==0);
     runtime_start(1);
@@ -350,6 +422,7 @@ int main(int argc,char **argv) {
     if (argc>1 && !strcmp(argv[1],"--rwlock-lifecycle")) { rw_lifecycle(); return 0; }
     if (argc>1 && !strcmp(argv[1],"--rwlock-concurrency")) { rw_concurrency(); return 0; }
     if (argc>1 && !strcmp(argv[1],"--rwlock-timeouts")) { rw_timeouts(); return 0; }
+    if (argc>1 && !strcmp(argv[1],"--rwlock-stress")) { rw_stress(); return 0; }
     libc_support(); posix_mutexes(); wall_time(); exit_handlers(); guards(); mutexes(); direct_memory(); memory_primitives();
     rw_lifecycle(); rw_concurrency(); rw_timeouts();
     puts("PASS: callback lifecycle, guard ABI, mutex errors, shared direct memory, memory primitives, resolver scope");
