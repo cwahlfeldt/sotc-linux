@@ -2268,9 +2268,43 @@ static int mapping_of(uintptr_t address, uintptr_t *lo, uintptr_t *hi) {
     if (maps) fclose(maps);
     return found;
 }
+/* sotc: SOTC_PROFILE_TRIGGER_FPS=<fps>: after SOTC_PROFILE_DELAY (and SOTC_PROFILE_START), the
+ * profilers wait until the game has run below that many FPS for SOTC_PROFILE_TRIGGER_S seconds
+ * in a row (default 5; seconds without any flip, a loading screen, do not count), so a profile
+ * catches a drop while the player just plays (tools/sotc_profile_drop.sh). The first profiler
+ * thread to get here watches; the others wait for it and start together. */
+static pthread_mutex_t profile_trigger_lock=PTHREAD_MUTEX_INITIALIZER;
+static int profile_triggered;
+static double monotonic_seconds(void) {
+    struct timespec t;
+    return clock_gettime(CLOCK_MONOTONIC,&t) ? 0.0 : (double)t.tv_sec+(double)t.tv_nsec/1e9;
+}
 static void profile_wait_start(void) {
     const char *start=getenv("SOTC_PROFILE_START");
     while (start && *start && access(start,F_OK)) usleep(50000);
+    const char *limit_text=getenv("SOTC_PROFILE_TRIGGER_FPS");
+    if (!limit_text || !*limit_text) return;
+    pthread_mutex_lock(&profile_trigger_lock);
+    if (!profile_triggered) {
+        const double limit=atof(limit_text);
+        const char *need_text=getenv("SOTC_PROFILE_TRIGGER_S");
+        const int need=need_text && atoi(need_text)>0 ? atoi(need_text) : 5;
+        fprintf(stderr,"SOTC profile: waiting for %d s in a row below %.1f FPS\n",need,limit);
+        uint64_t flips=bbgpu_flip_count();
+        double t=monotonic_seconds(), fps=0.0, sum=0.0;
+        for (int below=0; below<need;) {
+            sleep(1);
+            const uint64_t now_flips=bbgpu_flip_count();
+            const double now=monotonic_seconds();
+            fps=now>t ? (double)(now_flips-flips)/(now-t) : 0.0;
+            flips=now_flips; t=now;
+            if (fps>=1.0 && fps<limit) { ++below; sum+=fps; }
+            else { below=0; sum=0.0; }
+        }
+        fprintf(stderr,"SOTC profile: triggered (%d s at %.1f FPS on average)\n",need,sum/need);
+        profile_triggered=1;
+    }
+    pthread_mutex_unlock(&profile_trigger_lock);
 }
 #define LPROF_SLOTS (1u<<18)
 typedef struct { uintptr_t address; unsigned leaf, inclusive; } LinuxSlot;
