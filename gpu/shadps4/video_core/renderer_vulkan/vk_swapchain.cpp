@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <cstdio>
 #include <cstdlib>
 #include <limits>
 #include "common/assert.h"
@@ -9,9 +10,11 @@
 #include "core/emulator_settings.h"
 #include "imgui/renderer/imgui_core.h"
 #include "sdl_window.h"
+#include "video_core/renderer_vulkan/sotc_display.h"
 #include "video_core/renderer_vulkan/vk_dlssg.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_swapchain.h"
+#include "video_core/sotc_stats.h"
 
 namespace Vulkan {
 
@@ -81,6 +84,13 @@ void Swapchain::Create(u32 width_, u32 height_) {
 
     SetupImages();
     RefreshSemaphores();
+    // sotc: when this swapchain's frames reach the screen (sotc_display.h). Not through
+    // Streamline (DLSS-G), whose proxy swapchain would get the ids and waits.
+    timing = instance.IsPresentWaitEnabled() && !Dlssg::Enabled() &&
+             VULKAN_HPP_DEFAULT_DISPATCHER.vkWaitForPresentKHR != nullptr;
+    next_present_id = 0;
+    pending_head = pending_count = 0;
+    SotcDisplay::Reset();
 }
 
 void Swapchain::Recreate(u32 width_, u32 height_) {
@@ -132,7 +142,14 @@ bool Swapchain::AcquireNextImage() {
 }
 
 bool Swapchain::Present() {
+    // sotc: each present gets an id (increasing, never 0) for SotcDisplay's feedback.
+    const u64 present_id = next_present_id + 1;
+    const vk::PresentIdKHR present_id_info = {
+        .swapchainCount = 1,
+        .pPresentIds = &present_id,
+    };
     const vk::PresentInfoKHR present_info = {
+        .pNext = timing ? &present_id_info : nullptr,
         .waitSemaphoreCount = 1,
         .pWaitSemaphores = &present_ready[image_index],
         .swapchainCount = 1,
@@ -147,10 +164,66 @@ bool Swapchain::Present() {
         ASSERT_MSG(result == vk::Result::eSuccess, "Swapchain presentation failed: {}",
                    vk::to_string(result));
     }
+    if (timing) {
+        next_present_id = present_id;
+        if (result == vk::Result::eSuccess || result == vk::Result::eSuboptimalKHR) {
+            if (pending_count == pending_ids.size()) { // the oldest never reported: forget it
+                pending_head = (pending_head + 1) % pending_ids.size();
+                --pending_count;
+            }
+            const u32 slot = (pending_head + pending_count) % pending_ids.size();
+            pending_ids[slot] = present_id;
+            pending_ns[slot] = SotcStats::NowNs();
+            ++pending_count;
+            SotcDisplay::OnPresent(present_id);
+        }
+    }
 
     frame_index = (frame_index + 1) % image_count;
+    PollPresented();
 
     return !needs_recreation;
+}
+
+void Swapchain::PollPresented() {
+    if (!timing || pending_count == 0) {
+        return;
+    }
+    const auto wait = VULKAN_HPP_DEFAULT_DISPATCHER.vkWaitForPresentKHR;
+    const VkDevice device = static_cast<VkDevice>(instance.GetDevice());
+    const VkSwapchainKHR handle = static_cast<VkSwapchainKHR>(swapchain);
+    u64 done = 0;
+    u32 count = 0;
+    while (pending_count != 0) {
+        const VkResult result = wait(device, handle, pending_ids[pending_head], 0);
+        if (result == VK_TIMEOUT) {
+            break;
+        }
+        if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
+            // Out of date, surface lost: nothing more comes for this swapchain's presents.
+            pending_count = 0;
+            SotcDisplay::Reset();
+            return;
+        }
+        done = pending_ids[pending_head];
+        ++count;
+        pending_head = (pending_head + 1) % pending_ids.size();
+        --pending_count;
+    }
+    if (count != 0) {
+        SotcDisplay::OnShown(done, SotcDisplay::Clock::now(), count - 1);
+    } else if (SotcStats::NowNs() - pending_ns[pending_head] > 1'000'000'000ULL) {
+        // Nothing reported done for a second (a hidden window, a compositor without feedback):
+        // start over rather than pair old ids with new times.
+        static bool told = false;
+        if (!told) {
+            told = true;
+            std::fprintf(stderr, "SOTC DISPLAY: no present reported done for 1 s; feedback "
+                                 "starts over\n");
+        }
+        pending_count = 0;
+        SotcDisplay::Reset();
+    }
 }
 
 void Swapchain::FindPresentFormat() {
@@ -275,6 +348,7 @@ void Swapchain::SetSurfaceProperties() {
 }
 
 void Swapchain::Destroy() {
+    pending_count = 0; // sotc: the ids of this swapchain's presents end with it
     vk::Device device = instance.GetDevice();
     const auto wait_result = device.waitIdle();
     if (wait_result != vk::Result::eSuccess) {

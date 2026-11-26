@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
@@ -16,6 +17,7 @@
 #include "imgui/renderer/imgui_core.h"
 #include "sdl_window.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
+#include "video_core/renderer_vulkan/sotc_display.h"
 #include "video_core/renderer_vulkan/vk_dlssg.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
@@ -365,6 +367,23 @@ bool Instance::CreateDevice() {
     // Optional
     maintenance_5 = add_extension(VK_KHR_MAINTENANCE_5_EXTENSION_NAME);
     maintenance_8 = add_extension(VK_KHR_MAINTENANCE_8_EXTENSION_NAME);
+    // sotc: when frames reach the screen (sotc_display.h): present ids and present wait, both
+    // extensions and both features, unless SOTC_DISPLAY_TIMING=0.
+    if (SotcDisplay::TimingWanted()) {
+        const auto has = [&](std::string_view extension) {
+            return std::ranges::find(available_extensions, extension) != available_extensions.end();
+        };
+        if (has(VK_KHR_PRESENT_ID_EXTENSION_NAME) && has(VK_KHR_PRESENT_WAIT_EXTENSION_NAME)) {
+            const auto chain = physical_device.getFeatures2<vk::PhysicalDeviceFeatures2,
+                                                            vk::PhysicalDevicePresentIdFeaturesKHR,
+                                                            vk::PhysicalDevicePresentWaitFeaturesKHR>();
+            if (chain.get<vk::PhysicalDevicePresentIdFeaturesKHR>().presentId &&
+                chain.get<vk::PhysicalDevicePresentWaitFeaturesKHR>().presentWait) {
+                present_wait = add_extension(VK_KHR_PRESENT_ID_EXTENSION_NAME) &&
+                               add_extension(VK_KHR_PRESENT_WAIT_EXTENSION_NAME);
+            }
+        }
+    }
     // sotc: the game's memory imported for the GPU in place (SOTC_PC_MEMORY=1,
     // docs/sotc/PC-MEMORY-MODEL.md); asked for only then.
     if (const char* v = std::getenv("SOTC_PC_MEMORY"); v && v[0] == '1') {
@@ -820,6 +839,17 @@ bool Instance::CreateDevice() {
         auto& features2 = device_chain.get<vk::PhysicalDeviceFeatures2>();
         fault_features.pNext = features2.pNext;
         features2.pNext = &fault_features;
+    }
+    // sotc: present ids and present wait (sotc_display.h), chained the same way.
+    vk::PhysicalDevicePresentWaitFeaturesKHR present_wait_features{.presentWait = vk::True};
+    vk::PhysicalDevicePresentIdFeaturesKHR present_id_features{
+        .pNext = &present_wait_features,
+        .presentId = vk::True,
+    };
+    if (present_wait) {
+        auto& features2 = device_chain.get<vk::PhysicalDeviceFeatures2>();
+        present_wait_features.pNext = features2.pNext;
+        features2.pNext = &present_id_features;
     }
 
     auto [device_result, dev] = physical_device.createDeviceUnique(device_chain.get());

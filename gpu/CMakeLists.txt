@@ -347,3 +347,9 @@ add_executable(upscaler-support-test EXCLUDE_FROM_ALL ../tests/test_upscaler_sup
 target_include_directories(upscaler-support-test PRIVATE shim)
 target_compile_options(upscaler-support-test PRIVATE -UNDEBUG)
 
+
+# sotc: the display lock (sotc_display.cpp) against a simulated fixed-refresh screen.
+add_executable(display-lock-test EXCLUDE_FROM_ALL ../tests/test_display_lock.cpp
+    shadps4/video_core/renderer_vulkan/sotc_display.cpp)
+target_include_directories(display-lock-test PRIVATE shadps4)
+target_compile_options(display-lock-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)

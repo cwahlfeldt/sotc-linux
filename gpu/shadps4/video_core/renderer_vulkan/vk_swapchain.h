@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <array>
 #include <mutex>
 #include <vector>
 #include "common/types.h"
@@ -33,6 +34,11 @@ public:
 
     /// Presents the current image and move to the next one
     bool Present();
+
+    /// sotc: reports to SotcDisplay the presents the presentation engine has done since the
+    /// last call (vkWaitForPresentKHR without waiting). Only on the thread that presents, as
+    /// Present(): the swapchain must not be used by two threads at once.
+    void PollPresented();
 
     vk::SurfaceKHR GetSurface() const {
         return surface;
@@ -136,6 +142,14 @@ private:
     bool needs_recreation = true;
     bool needs_hdr = false;    // The game requested HDR swapchain
     bool supports_hdr = false; // SC supports HDR output
+    // sotc: present ids for SotcDisplay (VK_KHR_present_wait): the ones not seen done yet, oldest
+    // first, in a ring.
+    bool timing = false;
+    u64 next_present_id = 0;
+    std::array<u64, 32> pending_ids{};
+    std::array<u64, 32> pending_ns{}; // when each was queued (SotcStats::NowNs)
+    u32 pending_head = 0;
+    u32 pending_count = 0;
 };
 
 } // namespace Vulkan

@@ -12,6 +12,7 @@
 #include "bbport_overlay.h"
 #include "bbport_settings.h"
 #include "video_core/renderdoc.h"
+#include "video_core/renderer_vulkan/sotc_display.h"
 #include "video_core/sotc_event.h"
 #include "video_core/sotc_stats.h"
 #include "video_core/sotc_ui_lang.h"
@@ -32,6 +33,24 @@ namespace Frontend {
 // cursor); Esc or losing focus releases it. runtime_pad.c takes the motion as the right stick
 // and the buttons through its bindings (mouse.<input>=). SOTC_MOUSE=0 leaves the mouse alone.
 namespace {
+// sotc: the refresh rate of the screen the window is on, for SotcDisplay (sotc_display.h); the
+// mode's exact fraction when SDL has it (a 59.94 Hz screen is not 60). Window thread.
+void PublishRefresh(SDL_Window* window) {
+    const SDL_DisplayMode* mode = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(window));
+    if (!mode) {
+        return;
+    }
+    const double hz = mode->refresh_rate_numerator > 0 && mode->refresh_rate_denominator > 0
+                          ? double(mode->refresh_rate_numerator) / mode->refresh_rate_denominator
+                          : double(mode->refresh_rate);
+    static double told = 0.0;
+    if (hz != told) {
+        told = hz;
+        std::fprintf(stderr, "SOTC DISPLAY: screen refresh %.3f Hz\n", hz);
+    }
+    Vulkan::SotcDisplay::SetRefreshHz(hz);
+}
+
 std::atomic<float> g_mouse_dx{0}, g_mouse_dy{0};
 std::atomic<u32> g_mouse_buttons{0};
 std::atomic<bool> g_mouse_captured{false};
@@ -108,6 +127,7 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
     window = SDL_CreateWindowWithProperties(props);
     SDL_DestroyProperties(props);
     ASSERT_MSG(window, "Failed to create window: {}", SDL_GetError());
+    PublishRefresh(window); // sotc
     SetWindowIcon(window); // Linux: launcher/sotc.png (PR #118); the launcher's icon below wins
     // sotc: the game's own icon (sce_sys/icon0.png of the player's dump, as a BMP the launcher
     // writes: SOTC_WINDOW_ICON) instead of the executable's.
@@ -202,6 +222,7 @@ void WindowSDL::UpdateTitleStats() {
     if (now - title_ticks < 1000) {
         return;
     }
+    PublishRefresh(window); // sotc: once a second, the window may have moved to another screen
     const u64 flips = SotcStats::flip_count.load(std::memory_order_relaxed);
     if (title_ticks != 0) {
         const double fps = double(flips - title_flips) * 1000.0 / double(now - title_ticks);

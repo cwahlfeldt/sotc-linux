@@ -111,6 +111,11 @@ public:
     Frame* PrepareBlankFrame(bool present_thread);
 
     void Present(Frame* frame, bool is_reusing_frame = false, bool is_game_frame = true);
+    /// sotc: when frames reached the screen (sotc_display.h), polled without waiting. Only on the
+    /// thread that presents.
+    void PollDisplay() {
+        swapchain.PollPresented();
+    }
     Frame* PrepareLastFrame();
 
 private:
