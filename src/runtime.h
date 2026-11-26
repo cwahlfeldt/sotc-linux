@@ -48,6 +48,20 @@ uintptr_t runtime_content_resolve(const char *name);
 void runtime_content_report(void);
 typedef struct { const char *name; void *function; } RuntimeExport;
 #define RUNTIME_LOOKUP(table, nid) runtime_lookup(table, sizeof(table)/sizeof(*(table)), nid)
+/* sotc: a statistics counter on a hot path (every guest lock and unlock). A plain `++total` from
+ * every thread bounced the total's cache line between cores on each call, inside the game's most
+ * contended critical sections, and lost counts (it was not atomic). Each call site counts in a
+ * variable of its own thread and adds to the shared total every 256 events, so totals read with
+ * RUNTIME_STAT_READ lag by at most 255 per thread and site (they are only reported at exit). */
+#define RUNTIME_STAT_BATCH 256u
+#define RUNTIME_STAT(total) do { \
+        static _Thread_local unsigned runtime_stat_local_; \
+        if (++runtime_stat_local_ == RUNTIME_STAT_BATCH) { \
+            __atomic_fetch_add(&(total), RUNTIME_STAT_BATCH, __ATOMIC_RELAXED); \
+            runtime_stat_local_ = 0; \
+        } \
+    } while (0)
+#define RUNTIME_STAT_READ(total) __atomic_load_n(&(total), __ATOMIC_RELAXED)
 const char *runtime_symbol(const char *nid);
 uintptr_t runtime_lookup(const RuntimeExport *table, size_t count, const char *nid);
 uintptr_t runtime_kernel_resolve(const char *name);

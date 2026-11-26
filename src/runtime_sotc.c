@@ -67,7 +67,10 @@ static ABI int32_t get_thread_id(void) {
 #ifdef _WIN32
     return (int32_t)GetCurrentThreadId();
 #else
-    return (int32_t)syscall(SYS_gettid);
+    /* sotc: a system call per scePthreadGetthreadid before; a thread's id never changes. */
+    static _Thread_local int32_t tid;
+    if (!tid) tid=(int32_t)syscall(SYS_gettid);
+    return tid;
 #endif
 }
 static ABI int32_t uuid_create(unsigned char *uuid) {
