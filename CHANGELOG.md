@@ -21,12 +21,9 @@
   texture pool reserve is 0 at any render size above 1920×1080. `SOTC_FPS_DYNAMIC_SLOW_FPS` sets
   the rate under which a frame counts as slow. The F1 menu logs it when a setting cannot be saved.
 - **The shader cache is rebuilt on the first start.**
-- ⏱️ **Steadier frame pacing on Linux**: the threads that time presentation (the present thread:
-  vblanks and flips; the presenter: FSR 3 frame generation's half-frame wait) ran as ordinary
-  threads, since shadPS4's real-time setting does nothing on Linux. They now sleep with a 1 ns
-  timer slack and run at nice -10 where `RLIMIT_NICE` allows (1 ms sleeps overshoot by ~4 µs
-  instead of ~52 µs), so a busy CPU no longer delays a flip by a scheduler slice.
-  `SOTC_PRESENT_NICE=<-20..-1>` sets the level, `=0` turns it off.
+- Off by default, measured without a gain: `SOTC_PRESENT_NICE=<-20..-1>` (the present and
+  presenter threads at that nice level with a 1 ns timer slack; at -10 the uncapped Shrine
+  benchmark lost ~5 FPS in its light stretch and the temple stuttered more at 60 FPS).
 - 🕰️ **The game's clock rate is measured once, precisely**: the engine times itself with the TSC
   divided by `sceKernelGetTscFrequency`. That frequency was taken over one unbracketed 20 ms
   sleep against a clock NTP may be slewing (chrony slews up to 8.3% after boot), and threads

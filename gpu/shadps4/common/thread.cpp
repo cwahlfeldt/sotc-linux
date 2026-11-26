@@ -88,17 +88,17 @@ void SetCurrentThreadRealtime(const std::chrono::nanoseconds period_ns) {
 // 50 us timer slack, and with the game's job workers and the GPU threads busy on every core, a
 // woken tick could wait most of a scheduler slice (several ms with many CPUs) before it ran: a
 // flip released late, a vblank the game saw late, a generated frame left on screen too long.
-// The calling thread now sleeps with a 1 ns timer slack and runs at nice SOTC_PRESENT_NICE
-// (default -10). It sleeps most of the time, so the weight takes nothing from the game in steady
-// state; it only lets the thread preempt on wakeup. The level is what RLIMIT_NICE (or
-// CAP_SYS_NICE) allows, nothing when neither does; SOTC_PRESENT_NICE=0 leaves the thread as it
-// was (timer slack included). SCHED_FIFO is not used: the present thread records and submits
-// Vulkan work, which a real-time policy could let starve the rest of its core.
+// SOTC_PRESENT_NICE=<-20..-1> makes the calling thread sleep with a 1 ns timer slack and run at
+// that nice level, as far as RLIMIT_NICE (or CAP_SYS_NICE) allows. Off by default (26 Nov 2026):
+// at nice -10 the uncapped Shrine benchmark ran ~5 FPS lower in its light stretch (3 runs
+// against 2), and in play at 60 FPS the temple stuttered more than with it off (the user's
+// test). SCHED_FIFO is not used: the present thread records and submits Vulkan work, which a
+// real-time policy could let starve the rest of its core.
 void SetCurrentThreadRealtime(const std::chrono::nanoseconds period_ns) {
     (void)period_ns;
     static const int want = [] {
         const char* v = std::getenv("SOTC_PRESENT_NICE");
-        const long n = v && *v ? std::strtol(v, nullptr, 10) : -10;
+        const long n = v && *v ? std::strtol(v, nullptr, 10) : 0;
         return static_cast<int>(std::clamp(n, -20L, 0L));
     }();
     if (want == 0) {
