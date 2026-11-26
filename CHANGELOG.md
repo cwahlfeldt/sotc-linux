@@ -21,6 +21,32 @@
   texture pool reserve is 0 at any render size above 1920×1080. `SOTC_FPS_DYNAMIC_SLOW_FPS` sets
   the rate under which a frame counts as slow. The F1 menu logs it when a setting cannot be saved.
 - **The shader cache is rebuilt on the first start.**
+- ⏱️ **Steadier frame pacing on Linux**: the threads that time presentation (the present thread:
+  vblanks and flips; the presenter: FSR 3 frame generation's half-frame wait) ran as ordinary
+  threads, since shadPS4's real-time setting does nothing on Linux. They now sleep with a 1 ns
+  timer slack and run at nice -10 where `RLIMIT_NICE` allows (1 ms sleeps overshoot by ~4 µs
+  instead of ~52 µs), so a busy CPU no longer delays a flip by a scheduler slice.
+  `SOTC_PRESENT_NICE=<-20..-1>` sets the level, `=0` turns it off.
+- 🕰️ **The game's clock rate is measured once, precisely**: the engine times itself with the TSC
+  divided by `sceKernelGetTscFrequency`. That frequency was taken over one unbracketed 20 ms
+  sleep against a clock NTP may be slewing (chrony slews up to 8.3% after boot), and threads
+  asking at once each got their own value. It is now measured once, each end bracketed by two TSC
+  reads, against both the system clock and the raw one (the raw one wins while a slew is in
+  progress): repeat runs agree within ~0.2 ppm. The log says when the kernel does not use the
+  TSC as its clock source. `SOTC_TSC_HZ=<Hz>` sets it.
+- 🔒 **Less time in the game's locks**: guest rwlocks no longer go through one process-wide
+  mutex, a list of every rwlock and a malloc/free on each lock and unlock (readers of unrelated
+  locks queued behind each other); guest mutexes no longer make a `gettid` system call while
+  held; the lock counters no longer share one cache line between all threads. Same error codes
+  as before.
+- 🔊 **Sound threads first, as the game asks**: the threads the game runs at the top PS4
+  priority (`sndx_*`, `SoundSystemSndx`) run 6 nice levels above the rest where `RLIMIT_NICE`
+  allows. On 4 CPU threads or fewer the Windows rule (#267) now applies on Linux too: job workers
+  4 levels below, file and loading threads 2 above. `SOTC_JOB_PRIORITY=0` turns it off, `=2`
+  applies the small-CPU rule on any CPU.
+- 🎮 **Input seen sooner**: the window thread waits for the next event instead of sleeping a
+  fixed 2 ms between event pumps, so keys, clicks, mouse motion and pad changes reach the game as
+  they arrive. `SOTC_INPUT_WAIT=0` restores the fixed delay.
 - Tools: `tools/sotc_ride_bench.py` (a world-streaming benchmark: Wander carried along a fixed
   5.8 km loop by the engine's own commands, frame-time stats at 60 FPS) and a gameplay benchmark
   that ignores the player's saved FPS limit and frame generation. `SOTC_WINDOW_BEHIND` works on
