@@ -21,6 +21,18 @@
   texture pool reserve is 0 at any render size above 1920×1080. `SOTC_FPS_DYNAMIC_SLOW_FPS` sets
   the rate under which a frame counts as slow. The F1 menu logs it when a setting cannot be saved.
 - **The shader cache is rebuilt on the first start.**
+- 🖥️ **Frames locked to the screen's real refresh** (Linux; screens without adaptive sync): a
+  steady 60 FPS stuttered on a 240 Hz screen because the flips were timed on the port's own clock,
+  which drifts against the screen's: frames came out after 3, 4 or 5 refreshes (12.5 / 16.7 /
+  20.8 ms) in turn. The swapchain now reports when each frame reached the screen
+  (`VK_KHR_present_wait`), the port follows the screen's refresh from that, and the 60 FPS limit,
+  the dynamic FPS step and the 30 FPS cap release each flip a whole number of refreshes after the
+  last one, at the point where it comes out on the same refresh every time. In a simulation of a
+  240 Hz screen the frames held for an uneven number of refreshes went from 12% to 0.3% at 60 FPS
+  and from 15% to 0.3% at 30 FPS. With adaptive sync (VRR) on, nothing is locked (the screen
+  already waits for each frame). Every 5 s the log has a `SOTC DISPLAY` line (refreshes per frame,
+  intervals, lock state). `SOTC_DISPLAY_LOCK=0` times the flips as before; `SOTC_DISPLAY_TIMING=0`
+  also turns the feedback off. `ninja -C out/gpu display-lock-test` runs the simulation.
 - Off by default, measured without a gain: `SOTC_PRESENT_NICE=<-20..-1>` (the present and
   presenter threads at that nice level with a 1 ns timer slack; at -10 the uncapped Shrine
   benchmark lost ~5 FPS in its light stretch and the temple stuttered more at 60 FPS).
