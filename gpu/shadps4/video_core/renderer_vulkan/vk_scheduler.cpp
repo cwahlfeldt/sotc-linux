@@ -170,8 +170,9 @@ void Scheduler::StartDrainWatch() {
         const vk::Semaphore timeline = work_semaphore.Handle();
         u64 known = 0;
         while (!stoken.stop_requested()) {
-            const u64 target =
-                std::max(known + 1, recorded_submit_tick.load(std::memory_order_acquire));
+            // The next tick, not the newest one queued: the known GPU tick (TakeDrained) stays
+            // fresh while several are in flight; the counter read below skips any finished.
+            const u64 target = known + 1;
             const vk::SemaphoreWaitInfo wait_info = {
                 .semaphoreCount = 1,
                 .pSemaphores = &timeline,
@@ -515,7 +516,10 @@ void Scheduler::PopPendingOperations() {
         return;
     }
     if (!work_semaphore.IsFree(pending_ops.front().gpu_tick)) {
-        work_semaphore.Refresh();
+        // sotc: the drain watch's tick first; the driver only when that is not enough.
+        if (!TakeDrained() || !work_semaphore.IsFree(pending_ops.front().gpu_tick)) {
+            work_semaphore.Refresh();
+        }
     }
     while (!pending_ops.empty() && work_semaphore.IsFree(pending_ops.front().gpu_tick)) {
         PendingOp op = std::move(pending_ops.front());
@@ -688,7 +692,12 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
         }
     }
 
-    work_semaphore.Refresh();
+    // sotc: with the drain watch (SOTC_FLUSH_STARVED) the known tick comes from it: at the temple
+    // this driver query ran ~5,000 times a second, ~2% of the draw thread. PopPendingOperations
+    // and IsFree still ask the driver when an older value is not enough.
+    if (!TakeDrained()) {
+        work_semaphore.Refresh();
+    }
     BeginSession();
 
     // Apply pending operations

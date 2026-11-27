@@ -533,8 +533,27 @@ public:
         if (work_semaphore.IsFree(tick)) {
             return true;
         }
+        // sotc: the drain watch may already know (no driver call); else ask the driver as before.
+        if (TakeDrained() && work_semaphore.IsFree(tick)) {
+            return true;
+        }
         work_semaphore.Refresh();
         return work_semaphore.IsFree(tick);
+    }
+
+    /// sotc: the drain watch's newest finished tick into the known GPU tick, without a driver
+    /// call (SOTC_FLUSH_STARVED). False when no drain watch runs, or with SOTC_DRAIN_TICK=0
+    /// (every such check asks the driver, as before).
+    bool TakeDrained() noexcept {
+        static const bool use = [] {
+            const char* v = std::getenv("SOTC_DRAIN_TICK");
+            return !v || v[0] != '0';
+        }();
+        if (!use || !drain_watching.load(std::memory_order_relaxed)) {
+            return false;
+        }
+        work_semaphore.Advance(drained_tick.load(std::memory_order_acquire));
+        return true;
     }
 
     /// Returns the scheduler timeline semaphore.

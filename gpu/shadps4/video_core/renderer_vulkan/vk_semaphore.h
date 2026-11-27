@@ -48,6 +48,16 @@ public:
     /// Refresh the known GPU tick
     void Refresh();
 
+    /// sotc: raises the known GPU tick to tick, a value the GPU has reached that another thread
+    /// learned (Scheduler's drain watch), without asking the driver.
+    void Advance(u64 tick) noexcept {
+        u64 known = gpu_tick.load(std::memory_order_acquire);
+        while (known < tick && !gpu_tick.compare_exchange_weak(known, tick,
+                                                               std::memory_order_release,
+                                                               std::memory_order_relaxed)) {
+        }
+    }
+
     /// Waits for a tick to be hit on the GPU
     void Wait(u64 tick);
 
