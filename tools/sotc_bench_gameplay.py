@@ -17,7 +17,8 @@ frame) or down the stairs (~9300), so two runs often measure different scenes.
 
 NAME=VALUE pairs go to the game's environment (A/B switches, SOTC_PROFILE=...). The window's start
 creates SOTC_PROFILE_START's file, so SOTC_PROFILE / SOTC_THREAD_TIMES with SOTC_PROFILE_DELAY=0
-cover exactly the measured seconds. A screenshot is taken 5 s in (out/bench/<label>.png).
+cover exactly the measured seconds. Screenshots are taken 5 s in (out/bench/<label>.png) and
+right after it (out/bench/<label>-end.png: the heavy view after the save's cutscene).
 Logs: out/bench/<label>.log; one line per run appended to out/bench/summary.txt.
 SOTC_BENCH_WRAP: a command in front of the game, e.g. "systemd-run --user --scope
 --slice=sotc.slice -p MemoryHigh=12G" (keeps a test run out of the desktop session's memory).
@@ -104,6 +105,8 @@ def main():
         shot.touch()
         time.sleep(max(0.0, args.measure - 5))
         end = len(log_path.read_bytes())
+        shot.touch()  # after the window: the view it ended on
+        time.sleep(2)
     finally:
         if game.poll() is None:
             # The wrapper (systemd-run --scope, env) execs timeout, which passes INT on to the game.
@@ -116,8 +119,9 @@ def main():
         pad.unlink(missing_ok=True)
     screenshots = ROOT / 'user' / 'screenshots'
     shots = sorted(screenshots.glob('*.png'), key=lambda p: p.stat().st_mtime) if screenshots.is_dir() else []
-    if shots and shots[-1].stat().st_mtime > time.time() - (time.monotonic() - t0):
-        shutil.copy(shots[-1], out / f'{args.label}.png')
+    shots = [p for p in shots if p.stat().st_mtime > time.time() - (time.monotonic() - t0)][-2:]
+    for path, name in zip(shots, (f'{args.label}.png', f'{args.label}-end.png')):
+        shutil.copy(path, out / name)
     window = log_path.read_bytes()[begin:end].decode('utf-8', 'replace')
     lines = re.findall(r'SOTC FPS ([0-9.]+) at \d+s; (\d+) cmds/frame', window)[1:]
     fps = [float(f) for f, _ in lines]
