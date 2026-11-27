@@ -887,6 +887,16 @@ void VideoOutDriver::Flip(const Request& req) {
                          static_cast<unsigned long long>(SotcStats::cached_image_bytes.load() >> 20),
                          static_cast<unsigned long long>(SotcStats::reuse_size_frees.exchange(0)));
             last_images_new = images_new;
+            // sotc: SOTC_DCC (image.cpp): render targets with a view format list (compressed on
+            // AMD) and those that lost it to a view in another format.
+            if (const uint64_t dcc = SotcStats::dcc_images.load(std::memory_order_relaxed)) {
+                ReportPrintf(report,
+                             "SOTC DCC: %llu images created with a view format list, %llu moved "
+                             "to a backing without it (%llu MB)\n",
+                             static_cast<unsigned long long>(dcc),
+                             static_cast<unsigned long long>(SotcStats::dcc_dropped.load()),
+                             static_cast<unsigned long long>(SotcStats::dcc_dropped_bytes.load() >> 20));
+            }
             // sotc: SOTC_RB_NARROW: GPU-written pages that the wide readback window would have
             // downloaded and unprotected (and the GPU protected again), left protected instead.
             if (const uint64_t kib = SotcStats::rb_narrow_kib.load(std::memory_order_relaxed)) {

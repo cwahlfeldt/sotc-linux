@@ -51,7 +51,7 @@ struct UniqueImage {
         : allocator{std::exchange(other.allocator, VK_NULL_HANDLE)},
           allocation{std::exchange(other.allocation, VK_NULL_HANDLE)},
           image{std::exchange(other.image, VK_NULL_HANDLE)}, image_ci{std::move(other.image_ci)},
-          size_bytes{std::exchange(other.size_bytes, 0)} {}
+          view_formats{other.view_formats}, size_bytes{std::exchange(other.size_bytes, 0)} {}
     UniqueImage& operator=(UniqueImage&& other) {
         // sotc: release an image this one still holds (it was overwritten and leaked before).
         Destroy();
@@ -60,11 +60,15 @@ struct UniqueImage {
         allocator = std::exchange(other.allocator, VK_NULL_HANDLE);
         allocation = std::exchange(other.allocation, VK_NULL_HANDLE);
         image_ci = std::move(other.image_ci);
+        view_formats = other.view_formats;
         size_bytes = std::exchange(other.size_bytes, 0);
         return *this;
     }
 
-    void Create(const vk::ImageCreateInfo& image_ci);
+    /// sotc: view_formats (SOTC_DCC): the only formats its views may take, passed to the driver
+    /// as a VkImageFormatListCreateInfo (empty: any compatible format, no list).
+    using ViewFormats = boost::container::static_vector<vk::Format, 8>;
+    void Create(const vk::ImageCreateInfo& image_ci, const ViewFormats& view_formats = {});
 
     void Destroy();
 
@@ -81,7 +85,8 @@ public:
     VmaAllocator allocator{};
     VmaAllocation allocation{};
     vk::Image image{};
-    vk::ImageCreateInfo image_ci{};
+    vk::ImageCreateInfo image_ci{}; ///< without pNext (the format list is view_formats)
+    ViewFormats view_formats{};
     vk::DeviceSize size_bytes{};
 };
 
@@ -177,6 +182,10 @@ public:
         // only grow and their entries never change, so an index stays valid for the backing's
         // lifetime; ~0u = none yet.
         u32 last_view = ~0u;
+        /// sotc: SOTC_DCC: replaced by a backing without a view format list (a view in another
+        /// format was asked for); kept for the views and commands that still name it, never
+        /// made current again.
+        bool retired = false;
     };
     std::deque<BackingImage> backing_images;
     BackingImage* backing{};

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <cstdio>
 #include "common/alignment.h"
 #include "bbport_toggles.h"
 #include "video_core/buffer_cache/buffer.h"
@@ -11,6 +12,7 @@
 #include "video_core/renderer_vulkan/sotc_cull_queue.h"
 #include "video_core/renderer_vulkan/sotc_gpu_times_note.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
+#include "video_core/sotc_stats.h"
 #include "video_core/texture_cache/blit_helper.h"
 #include "video_core/texture_cache/image.h"
 
@@ -661,8 +663,10 @@ void Runtime::SetBackingSamples(VideoCore::Image* image, u32 num_samples, bool c
     }
     ASSERT_MSG(!image->info.props.is_depth, "Swapping samples is only valid for color images");
     VideoCore::Image::BackingImage* new_backing;
-    auto it = std::ranges::find(backing_images, num_samples,
-                                &VideoCore::Image::BackingImage::num_samples);
+    // sotc: a retired backing (SOTC_DCC, DropViewFormatList) is never made current again.
+    auto it = std::ranges::find_if(backing_images, [&](const VideoCore::Image::BackingImage& b) {
+        return b.num_samples == num_samples && !b.retired;
+    });
     if (it == backing_images.end()) {
         auto new_image_ci = backing->image.image_ci;
         new_image_ci.samples = LiverpoolToVK::NumSamples(num_samples, image->supported_samples);
@@ -670,7 +674,7 @@ void Runtime::SetBackingSamples(VideoCore::Image* image, u32 num_samples, bool c
         new_backing = &backing_images.emplace_back();
         new_backing->num_samples = num_samples;
         new_backing->image = VideoCore::UniqueImage{instance.GetDevice(), instance.GetAllocator()};
-        new_backing->image.Create(new_image_ci);
+        new_backing->image.Create(new_image_ci, backing->image.view_formats);
 
         Vulkan::SetObjectName(instance.GetDevice(), new_backing->image.image,
                               "Image {}x{}x{} {} {} {:#x}:{:#x} L:{} M:{} S:{} (backing)",
@@ -727,6 +731,105 @@ void Runtime::SetBackingSamples(VideoCore::Image* image, u32 num_samples, bool c
     }
 
     backing = new_backing;
+}
+
+void Runtime::DropViewFormatList(VideoCore::Image* image, vk::Format asked) {
+    // sotc: SOTC_DCC (image.cpp): a view in `asked`, a format outside the current backing's view
+    // format list, is not allowed on it. The image moves to a backing made the same way without
+    // the list (on AMD: uncompressed), every level and layer copied; the old backing is retired
+    // but kept (views and recorded commands still name it), back in the state it was in, so a
+    // texture already bound from it for this draw reads it as recorded.
+    auto* const old_backing = image->backing;
+    if (!old_backing || old_backing->image.view_formats.empty()) {
+        return;
+    }
+    const auto& info = image->info;
+    const VideoCore::Image::State old_state = old_backing->state;
+    const bool uniform = old_backing->subresource_states.empty();
+    scheduler.EndRendering();
+
+    auto new_image_ci = old_backing->image.image_ci;
+    auto& new_backing = image->backing_images.emplace_back();
+    new_backing.num_samples = old_backing->num_samples;
+    new_backing.image = VideoCore::UniqueImage{instance.GetDevice(), instance.GetAllocator()};
+    new_backing.image.Create(new_image_ci);
+    Vulkan::SetObjectName(instance.GetDevice(), new_backing.image.image,
+                          "Image {}x{}x{} {} {:#x}:{:#x} L:{} M:{} (no view format list)",
+                          info.size.width, info.size.height, info.size.depth,
+                          vk::to_string(new_image_ci.format), info.guest_address, info.guest_size,
+                          info.resources.layers, info.resources.levels);
+
+    const bool defined = old_state.layout != vk::ImageLayout::eUndefined || !uniform;
+    if (defined) {
+        Transit(image, vk::ImageLayout::eTransferSrcOptimal, vk::PipelineStageFlagBits2::eCopy,
+                vk::AccessFlagBits2::eTransferRead);
+    }
+    image_barriers.push_back(vk::ImageMemoryBarrier2{
+        .srcStageMask = vk::PipelineStageFlagBits2::eNone,
+        .srcAccessMask = vk::AccessFlagBits2::eNone,
+        .dstStageMask = vk::PipelineStageFlagBits2::eCopy,
+        .dstAccessMask = vk::AccessFlagBits2::eTransferWrite,
+        .oldLayout = vk::ImageLayout::eUndefined,
+        .newLayout = defined ? vk::ImageLayout::eTransferDstOptimal : vk::ImageLayout::eGeneral,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = new_backing.image.image,
+        .subresourceRange{
+            .aspectMask = image->aspect_mask,
+            .baseMipLevel = 0,
+            .levelCount = VK_REMAINING_MIP_LEVELS,
+            .baseArrayLayer = 0,
+            .layerCount = VK_REMAINING_ARRAY_LAYERS,
+        },
+    });
+    FlushBarriers();
+    if (defined) {
+        boost::container::small_vector<vk::ImageCopy, 16> regions;
+        const auto& extent = new_image_ci.extent;
+        for (u32 mip = 0; mip < new_image_ci.mipLevels; ++mip) {
+            const vk::ImageSubresourceLayers layers{
+                .aspectMask = image->aspect_mask,
+                .mipLevel = mip,
+                .baseArrayLayer = 0,
+                .layerCount = new_image_ci.arrayLayers,
+            };
+            regions.push_back(vk::ImageCopy{
+                .srcSubresource = layers,
+                .dstSubresource = layers,
+                .extent = {std::max(extent.width >> mip, 1u), std::max(extent.height >> mip, 1u),
+                           std::max(extent.depth >> mip, 1u)},
+            });
+        }
+        scheduler.CommandBuffer().copyImage(
+            old_backing->image.image, vk::ImageLayout::eTransferSrcOptimal,
+            new_backing.image.image, vk::ImageLayout::eTransferDstOptimal, regions);
+        if (uniform) {
+            Transit(image, old_state.layout, old_state.pl_stage, old_state.access_mask);
+            FlushBarriers();
+        }
+        new_backing.state = {.pl_stage = vk::PipelineStageFlagBits2::eCopy,
+                             .access_mask = vk::AccessFlagBits2::eTransferWrite,
+                             .layout = vk::ImageLayout::eTransferDstOptimal};
+    } else {
+        new_backing.state = {.pl_stage = vk::PipelineStageFlagBits2::eCopy,
+                             .access_mask = vk::AccessFlagBits2::eTransferWrite,
+                             .layout = vk::ImageLayout::eGeneral};
+    }
+    old_backing->retired = true;
+    image->backing = &new_backing;
+
+    const u64 dropped = SotcStats::dcc_dropped.fetch_add(1, std::memory_order_relaxed);
+    SotcStats::dcc_dropped_bytes.fetch_add(old_backing->image.size_bytes,
+                                           std::memory_order_relaxed);
+    if (dropped < 40) {
+        std::fprintf(stderr,
+                     "SOTC DCC: image %#llx %ux%u %s (L%u M%u) viewed as %s: moved to a backing "
+                     "without a view format list%s\n",
+                     static_cast<unsigned long long>(info.guest_address), info.size.width,
+                     info.size.height, vk::to_string(new_image_ci.format).c_str(),
+                     info.resources.layers, info.resources.levels, vk::to_string(asked).c_str(),
+                     defined ? "" : " (nothing written yet)");
+    }
 }
 
 bool Runtime::IsBufferAccessed(const VideoCore::Buffer* handle, u64 offset, u64 size,

@@ -567,6 +567,9 @@ inline std::atomic<uint64_t> images_new{0}, image_ns{0};
 /// Parts of an image creation: format query, memory allocation (and how many got memory of
 /// their own instead of a block shared with others).
 inline std::atomic<uint64_t> image_query_ns{0}, image_alloc_ns{0}, image_dedicated{0};
+/// SOTC_DCC: images created with a view format list (since the start), those moved to a backing
+/// without it because a view in another format was asked for, and that backing's bytes.
+inline std::atomic<uint64_t> dcc_images{0}, dcc_dropped{0}, dcc_dropped_bytes{0};
 /// Video memory: usage the driver reports (texture cache GC), budget the GC works with, and the
 /// sparse buffer arena memory (never released) as allocations and bytes.
 /// SOTC_RELEASE_DEFER: unmap releases queued, released after the GPU, released at once (a bind

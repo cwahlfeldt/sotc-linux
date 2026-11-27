@@ -113,8 +113,10 @@ void UniqueImage::Destroy() {
     }
 }
 
-void UniqueImage::Create(const vk::ImageCreateInfo& image_ci) {
+void UniqueImage::Create(const vk::ImageCreateInfo& image_ci, const ViewFormats& view_formats) {
     this->image_ci = image_ci;
+    this->image_ci.pNext = nullptr; // sotc: kept for new backings; the format list is below
+    this->view_formats = view_formats;
     ASSERT(!image);
     // sotc: SOTC_IMAGE_DEDICATED=1: images of 2048x2048 texels and more (per layer, x layers)
     // get memory of their own. Shared 64 MiB blocks kept up to 1.7 GB of free space after an
@@ -140,7 +142,16 @@ void UniqueImage::Create(const vk::ImageCreateInfo& image_ci) {
         .pUserData = nullptr,
     };
 
-    const VkImageCreateInfo image_ci_unsafe = static_cast<VkImageCreateInfo>(image_ci);
+    VkImageCreateInfo image_ci_unsafe = static_cast<VkImageCreateInfo>(this->image_ci);
+    // sotc: SOTC_DCC: the formats its views may take. On AMD before RDNA3, an image made with
+    // MUTABLE_FORMAT and no list gets no colour compression (DCC).
+    const vk::ImageFormatListCreateInfo format_list{
+        .viewFormatCount = static_cast<u32>(this->view_formats.size()),
+        .pViewFormats = this->view_formats.data(),
+    };
+    if (!this->view_formats.empty()) {
+        image_ci_unsafe.pNext = &static_cast<const VkImageFormatListCreateInfo&>(format_list);
+    }
     VkImage unsafe_image{};
     VmaAllocationInfo alloc_info{};
     const SotcStats::ScopedTimer alloc_timer{SotcStats::image_alloc_ns};
@@ -202,6 +213,87 @@ static FormatQuery QueryImageFormat(const Vulkan::Instance& instance,
                                  : vk::SampleCountFlags{}};
     answers.emplace(key, answer);
     return answer;
+}
+
+// sotc: SOTC_DCC (default 1): colour compression (DCC) for the game's render targets on AMD.
+// Every image is created with MUTABLE_FORMAT (a view may take any format of the same size), and
+// RADV before RDNA3 gives such an image no DCC unless a VkImageFormatListCreateInfo names only
+// formats it can compress alike: the same channels in the same order and of the same size, float
+// or not (radv_dcc_formats_compatible). A render target gets its own format and those relatives
+// (UNORM, SNORM, UINT, SINT, SRGB, the scaled ones); a view in any other format moves the image
+// to a backing made without the list (Runtime::DropViewFormatList). Only images RADV would
+// compress get one: colour targets above 512x512, one sample, no mipmapped arrays, not 3D, not
+// R32/R64 (atomics keep them uncompressed). 1: images created for a colour buffer; 2: also those
+// a texture or a compute shader's storage binding created first (at the temple, 3440x1440: the
+// same frame rate, its compute passes slower and the draws reading their output faster); 0: no
+// lists, as before.
+static int DccMode() {
+    static const int mode = [] {
+        const char* v = std::getenv("SOTC_DCC");
+        const int m = v ? std::atoi(v) : 1;
+        if (m == 1 || m == 2) {
+            std::fprintf(stderr, "SOTC DCC: %s get a view format list (colour compression on "
+                                 "AMD; SOTC_DCC=0: none)\n",
+                         m == 1 ? "images made for a colour buffer" : "all render targets");
+            return m;
+        }
+        return 0;
+    }();
+    return mode;
+}
+
+static UniqueImage::ViewFormats DccViewFormats(vk::Format format) {
+    using F = vk::Format;
+    static constexpr F kNone = F::eUndefined;
+    static constexpr F kFamilies[][7] = {
+        {F::eR8Unorm, F::eR8Snorm, F::eR8Uscaled, F::eR8Sscaled, F::eR8Uint, F::eR8Sint,
+         F::eR8Srgb},
+        {F::eR8G8Unorm, F::eR8G8Snorm, F::eR8G8Uscaled, F::eR8G8Sscaled, F::eR8G8Uint,
+         F::eR8G8Sint, F::eR8G8Srgb},
+        {F::eR8G8B8A8Unorm, F::eR8G8B8A8Snorm, F::eR8G8B8A8Uscaled, F::eR8G8B8A8Sscaled,
+         F::eR8G8B8A8Uint, F::eR8G8B8A8Sint, F::eR8G8B8A8Srgb},
+        {F::eB8G8R8A8Unorm, F::eB8G8R8A8Snorm, F::eB8G8R8A8Uscaled, F::eB8G8R8A8Sscaled,
+         F::eB8G8R8A8Uint, F::eB8G8R8A8Sint, F::eB8G8R8A8Srgb},
+        {F::eA2B10G10R10UnormPack32, F::eA2B10G10R10SnormPack32, F::eA2B10G10R10UscaledPack32,
+         F::eA2B10G10R10SscaledPack32, F::eA2B10G10R10UintPack32, F::eA2B10G10R10SintPack32,
+         kNone},
+        {F::eA2R10G10B10UnormPack32, F::eA2R10G10B10SnormPack32, F::eA2R10G10B10UscaledPack32,
+         F::eA2R10G10B10SscaledPack32, F::eA2R10G10B10UintPack32, F::eA2R10G10B10SintPack32,
+         kNone},
+        {F::eR16Unorm, F::eR16Snorm, F::eR16Uscaled, F::eR16Sscaled, F::eR16Uint, F::eR16Sint,
+         kNone},
+        {F::eR16G16Unorm, F::eR16G16Snorm, F::eR16G16Uscaled, F::eR16G16Sscaled, F::eR16G16Uint,
+         F::eR16G16Sint, kNone},
+        {F::eR16G16B16A16Unorm, F::eR16G16B16A16Snorm, F::eR16G16B16A16Uscaled,
+         F::eR16G16B16A16Sscaled, F::eR16G16B16A16Uint, F::eR16G16B16A16Sint, kNone},
+        {F::eR32G32Uint, F::eR32G32Sint, kNone, kNone, kNone, kNone, kNone},
+        {F::eR32G32B32A32Uint, F::eR32G32B32A32Sint, kNone, kNone, kNone, kNone, kNone},
+    };
+    UniqueImage::ViewFormats out;
+    switch (format) {
+    case F::eR32Uint:
+    case F::eR32Sint:
+    case F::eR32Sfloat:
+    case F::eR64Uint:
+    case F::eR64Sint:
+    case F::eR64Sfloat:
+    case F::eUndefined:
+        return out;
+    default:
+        break;
+    }
+    for (const auto& family : kFamilies) {
+        if (std::ranges::find(family, format) != std::end(family)) {
+            for (const F f : family) {
+                if (f != kNone) {
+                    out.push_back(f);
+                }
+            }
+            return out;
+        }
+    }
+    out.push_back(format); // float formats (R16G16B16A16 SFLOAT, R11G11B10...) stand alone
+    return out;
 }
 
 Image::Image(const Vulkan::Instance& instance, Vulkan::Runtime& runtime_,
@@ -284,7 +376,18 @@ Image::Image(const Vulkan::Instance& instance, Vulkan::Runtime& runtime_,
     backing = &backing_images.emplace_back();
     backing->num_samples = info.num_samples;
     backing->image = UniqueImage{instance.GetDevice(), instance.GetAllocator()};
-    backing->image.Create(image_ci);
+    UniqueImage::ViewFormats view_formats;
+    if (DccMode() != 0 && (DccMode() == 2 || info.props.is_color_target) &&
+        !info.props.is_depth && !info.props.is_block && !info.props.is_volume &&
+        (usage_flags & vk::ImageUsageFlagBits::eColorAttachment) && info.num_samples == 1 &&
+        u64{info.size.width} * info.size.height > 512 * 512 &&
+        !(info.resources.layers > 1 && info.resources.levels > 1)) {
+        view_formats = DccViewFormats(supported_format);
+        if (!view_formats.empty()) {
+            SotcStats::dcc_images.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    backing->image.Create(image_ci, view_formats);
 
     Vulkan::SetObjectName(instance.GetDevice(), GetImage(),
                           "Image {}x{}x{} {} {} {:#x}:{:#x} L:{} M:{} S:{}", info.size.width,
@@ -320,6 +423,17 @@ ImageView& Image::FindView(const ImageViewInfo& view_info, bool ensure_guest_sam
         backing->last_view = static_cast<u32>(index);
         const auto view_id = backing->image_view_ids[index];
         return (*slot_image_views)[view_id];
+    }
+    // sotc: SOTC_DCC: a view outside the backing's format list is not allowed on it (on AMD it
+    // would read and write the compressed texels as another format): the image moves to a
+    // backing without the list once, its contents copied. The format is the one ImageView takes.
+    if (!backing->image.view_formats.empty() && !info.props.is_depth) {
+        const vk::Format format =
+            runtime->GetInstance().GetSupportedFormat(view_info.format, format_features);
+        if (std::ranges::find(backing->image.view_formats, format) ==
+            backing->image.view_formats.end()) {
+            runtime->DropViewFormatList(this, format);
+        }
     }
     const auto view_id = slot_image_views->insert(runtime->GetInstance(), view_info, *this);
     backing->last_view = static_cast<u32>(backing->image_view_infos.size());

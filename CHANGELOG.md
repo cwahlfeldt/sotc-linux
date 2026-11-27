@@ -78,6 +78,18 @@
   heavy temple view **~57.8 → ~59.1 FPS**, the draw thread ~0.6 ms per frame less busy.
   `SOTC_TC_MEMBARRIER=0` restores the fences; kernels without `membarrier` keep them.
   `ninja -C out/gpu tc-mutex-test` checks the lock both ways.
+- 🗜️ **Render targets compressed on AMD (Linux, RADV)**: every image the port makes may be viewed
+  in another format of the same size, and the driver gives such an image no colour compression
+  (DCC) on cards before RDNA3, so each full-screen pass read and wrote its targets uncompressed.
+  The game's render targets now name the formats they may be viewed in (their own and its
+  UNORM/SRGB/UINT/SNORM relatives), which keeps compression on; if a view in another format is
+  asked for, that image moves once to an uncompressed copy of itself (the two video out images
+  do, when presented). At 3440x1440 at the temple (RX 6650 XT) the costliest full-screen pass
+  takes 1.1–1.3 ms instead of 2.2, and the views with 5,000–7,000 commands per frame run
+  **~50 → ~55 FPS**; the image is unchanged. `SOTC_DCC=0` turns it off; `SOTC_DCC=2` also
+  compresses render targets first made by a texture or compute binding (the same frame rate:
+  its compute passes get slower, the draws reading them faster). The log's `SOTC DCC` line
+  counts the compressed images and those moved.
 - Diagnostics: with `SOTC_TICKWATCH=1` the log splits the GPU's idle time by what it waits for
   (`SOTC GPU WAITS`: work held by the recorder, commands the draw thread has not submitted yet,
   inside a render pass or not, its waits, the game) and counts the texture cache lock's slow
