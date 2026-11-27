@@ -86,7 +86,8 @@
   asked for, that image moves once to an uncompressed copy of itself (the two video out images
   do, when presented). At 3440x1440 at the temple (RX 6650 XT) the costliest full-screen pass
   takes 1.1–1.3 ms instead of 2.2, and the views with 5,000–7,000 commands per frame run
-  **~50 → ~55 FPS**; the image is unchanged. `SOTC_DCC=0` turns it off; `SOTC_DCC=2` also
+  **~50 → ~55 FPS** (the same five views: 49.2 → 52.3 FPS on average); the image is unchanged.
+  At 2560x1080, the camera turning at the altar: **70.8 → 75.7 FPS**. `SOTC_DCC=0` turns it off; `SOTC_DCC=2` also
   compresses render targets first made by a texture or compute binding (the same frame rate:
   its compute passes get slower, the draws reading them faster). The log's `SOTC DCC` line
   counts the compressed images and those moved.
