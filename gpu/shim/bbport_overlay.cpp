@@ -2517,13 +2517,28 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent,
             static const auto start = now;
             static auto second_start = now;
             static float lowest = 1e9f;
+            // sotc: with SOTC_FPS, the second's draws and dispatches per frame too: a scripted
+            // run tells a cutscene (~3,000 at the Shrine) from the playable view (~10,000) by it.
+            static u64 frames = 0;
+            static u64 commands_seen = SotcStats::commands.load(std::memory_order_relaxed);
+            ++frames;
             const float shown = 1000.0f / frame_ms_avg;
             lowest = std::min(lowest, shown);
             if (now - second_start >= std::chrono::seconds(1)) {
-                std::fprintf(stderr, "SOTC SCREEN FPS %.0fs: lowest %.0f, now %.0f\n",
-                             std::chrono::duration<float>(now - start).count(), lowest, shown);
+                const u64 commands = SotcStats::TakeDelta(SotcStats::commands, commands_seen);
+                if (SotcStats::kFpsLog) {
+                    std::fprintf(stderr,
+                                 "SOTC SCREEN FPS %.0fs: lowest %.0f, now %.0f, %llu cmds/frame\n",
+                                 std::chrono::duration<float>(now - start).count(), lowest, shown,
+                                 static_cast<unsigned long long>(commands / frames));
+                } else {
+                    std::fprintf(stderr, "SOTC SCREEN FPS %.0fs: lowest %.0f, now %.0f\n",
+                                 std::chrono::duration<float>(now - start).count(), lowest,
+                                 shown);
+                }
                 second_start = now;
                 lowest = 1e9f;
+                frames = 0;
             }
         }
         if (ms > 0.0f && ms < 5000.0f) {
