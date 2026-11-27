@@ -6,7 +6,7 @@ as in sotc_ride_bench.py), held there, and the camera keeps turning (right stick
 measures the same places from every direction: no pad route to drift.
 
     python3 tools/sotc_temple_tour.py [--label NAME] [--only t33,t67] [--hold 9] [--pan 200]
-                                      [--cap 0] [NAME=VALUE ...]
+                                      [--cap 0] [--res 3440x1440] [--render WxH] [NAME=VALUE ...]
     python3 tools/sotc_temple_tour.py --stats out/bench/NAME.log
 
 X is pressed through the intro and the menus (Continue: the save, at the Shrine) until gameplay
@@ -24,6 +24,9 @@ the grass.
 
 Defaults: uncapped (--cap 0: the slow places show as lower FPS, not as missed 60 FPS frames), the
 60 FPS mode, no dynamic FPS, no frame generation, no read-ahead; NAME=VALUE pairs go to the game.
+The size is pinned too (user/settings.json would leak in otherwise): --res is the output size
+(default 3440x1440), --render the size the game draws at (default: --res; smaller is scaled up
+by FSR 1), RCAS sharpening at its default strength.
 Logs: out/bench/<label>.log; one line per run appended to out/bench/summary.txt.
 SOTC_BENCH_WRAP: a command in front of the game, as in sotc_bench_gameplay.py.
 """
@@ -108,6 +111,8 @@ def run_once(label, stations, args):
     env = ['SOTC_PREFETCH=0', 'SOTC_MODES=fps60,af16', 'SOTC_FPS_CAP=off', 'SOTC_FPS=1',
            f'SOTC_FPS_LIMIT={args.cap}', 'SOTC_FPS_DYNAMIC=0', 'SOTC_FRAMEGEN=off',
            'SOTC_WINDOW_BEHIND=1', 'SOTC_SAVE_PROMPT=auto', f'SOTC_EXTRA_CVARS={cvars}',
+           f'SOTC_OUTPUT_RES={args.res}', f'SOTC_RENDER_RES={args.render or args.res}', 'BB_FSR1=1',
+           'BB_RCAS=1', 'BB_RCAS_ATTENUATION=250',
            f'BB_PAD_FILE={pad}', f'BB_FRAME_DUMP_TRIGGER={shot}', *args.env]
     limit = 120 + len(stations) * (args.hold + 1)
     command = [*shlex.split(os.environ.get('SOTC_BENCH_WRAP', '')), 'env', *env,
@@ -202,6 +207,8 @@ def main():
     parser.add_argument('--hold', type=float, default=9.0, help='seconds per station (default 9)')
     parser.add_argument('--pan', type=int, default=200, help='right stick x while measuring (default 200)')
     parser.add_argument('--cap', type=int, default=0, help='FPS limit (default 0: uncapped)')
+    parser.add_argument('--res', default='3440x1440', help='output size (default 3440x1440)')
+    parser.add_argument('--render', help='render size (default: --res; smaller: FSR 1 scales up)')
     parser.add_argument('--stats', help='print the stations of an existing log and exit')
     parser.add_argument('env', nargs='*', help='NAME=VALUE for the game')
     args = parser.parse_args()
@@ -228,7 +235,9 @@ def main():
     table = report(rows, stations)
     print(table, flush=True)
     summary = table.splitlines()[-1] if rows else 'no stations measured'
-    line = f'{args.label}: {summary}' if result == 'done' else f'{args.label}: INVALID ({result}; {summary})'
+    size = args.res if not args.render or args.render == args.res else f'{args.render}->{args.res}'
+    line = (f'{args.label} ({size}): {summary}' if result == 'done'
+            else f'{args.label} ({size}): INVALID ({result}; {summary})')
     print(line, flush=True)
     with open(ROOT / 'out' / 'bench' / 'summary.txt', 'a') as out:
         out.write(line + '\n')
