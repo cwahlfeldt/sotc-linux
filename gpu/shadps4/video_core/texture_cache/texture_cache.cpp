@@ -43,15 +43,6 @@ extern "C" void runtime_write_fault_dump(uintptr_t start, uint64_t size) __attri
 
 namespace VideoCore {
 
-void ReentrantMutex::AsymmetricBarrier() {
-    SotcStats::tc_slow_barriers.fetch_add(1, std::memory_order_relaxed);
-#ifdef _WIN32
-    FlushProcessWriteBuffers();
-#else
-    std::atomic_thread_fence(std::memory_order_seq_cst);
-#endif
-}
-
 static constexpr u64 PageShift = 12;
 static constexpr u64 NumFramesBeforeRemoval = 32;
 

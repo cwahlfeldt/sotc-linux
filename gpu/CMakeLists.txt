@@ -353,3 +353,10 @@ add_executable(display-lock-test EXCLUDE_FROM_ALL ../tests/test_display_lock.cpp
     shadps4/video_core/renderer_vulkan/sotc_display.cpp)
 target_include_directories(display-lock-test PRIVATE shadps4)
 target_compile_options(display-lock-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+
+# sotc: the texture cache lock (sotc_tc_mutex.cpp) with and without SOTC_TC_MEMBARRIER: mutual
+# exclusion, and what its owner and the other threads pay per hold.
+add_executable(tc-mutex-test EXCLUDE_FROM_ALL ../tests/test_tc_mutex.cpp
+    shadps4/video_core/texture_cache/sotc_tc_mutex.cpp)
+target_include_directories(tc-mutex-test PRIVATE shadps4)
+target_compile_options(tc-mutex-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
