@@ -22,7 +22,9 @@ the temple from the altar (~3,700-12,400 commands per frame). The summary line c
 seconds in stretches of 5 s or more under 5,000 commands per frame ("cutscene s"): a cutscene
 the skip missed. --replay FILE plays back a route the player recorded (BB_PAD_RECORD=FILE, F9 once
 Wander can move at the altar after the cutscene, F9 again at the end) from the window's start;
-the window then lasts the recording unless --measure is given.
+the window then lasts the recording unless --measure is given. Replay at the FPS limit the route
+was recorded with (--cap 60 for the 60 FPS mode): uncapped, the same stick input took Wander off
+the recorded path within ~20 s.
 
 NAME=VALUE pairs go to the game's environment (A/B switches, SOTC_PROFILE=...). The window's start
 creates SOTC_PROFILE_START's file, so SOTC_PROFILE / SOTC_THREAD_TIMES with SOTC_PROFILE_DELAY=0
@@ -59,6 +61,9 @@ def main():
     parser.add_argument('--pan', type=int, help='right stick x (0..255) held during the window')
     parser.add_argument('--skip', type=int, default=3, help="X holds to skip the save's cutscene")
     parser.add_argument('--replay', help='a BB_PAD_RECORD file played back during the window')
+    parser.add_argument('--cap', type=int, default=0,
+                        help='FPS limit (SOTC_FPS_LIMIT, default 0: uncapped); replay a route at the '
+                             'limit it was recorded with')
     parser.add_argument('env', nargs='*', help='NAME=VALUE for the game')
     args = parser.parse_args()
     replay_env = []
@@ -80,7 +85,7 @@ def main():
     # The player's settings (user/settings.json, sotc.py) must not change what is measured: no FPS
     # limit, no dynamic step, no frame generation; the window opens without the focus.
     env = ['SOTC_PREFETCH=0', 'SOTC_MODES=fps60,af16', 'SOTC_FPS_CAP=off', 'SOTC_FPS=1',
-           'SOTC_FPS_LIMIT=0', 'SOTC_FPS_DYNAMIC=0', 'SOTC_FRAMEGEN=off', 'SOTC_WINDOW_BEHIND=1',
+           f'SOTC_FPS_LIMIT={args.cap}', 'SOTC_FPS_DYNAMIC=0', 'SOTC_FRAMEGEN=off', 'SOTC_WINDOW_BEHIND=1',
            f'BB_PAD_FILE={pad}', f'BB_FRAME_DUMP_TRIGGER={shot}', f'SOTC_PROFILE_START={start_file}',
            *replay_env, *args.env]
     command = [*shlex.split(os.environ.get('SOTC_BENCH_WRAP', '')), 'env', *env,
