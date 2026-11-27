@@ -90,6 +90,7 @@ public:
             } else {
                 RawLock(); // a guest holds it or is waiting for us: queue behind it
                 mode = Mode::FastSlow;
+                SotcStats::tc_fast_queued.fetch_add(1, std::memory_order_relaxed);
             }
         } else {
             RawLock();

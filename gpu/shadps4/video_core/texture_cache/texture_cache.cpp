@@ -44,6 +44,7 @@ extern "C" void runtime_write_fault_dump(uintptr_t start, uint64_t size) __attri
 namespace VideoCore {
 
 void ReentrantMutex::AsymmetricBarrier() {
+    SotcStats::tc_slow_barriers.fetch_add(1, std::memory_order_relaxed);
 #ifdef _WIN32
     FlushProcessWriteBuffers();
 #else

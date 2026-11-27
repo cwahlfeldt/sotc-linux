@@ -58,26 +58,80 @@ void Scheduler::StartTickWatch() {
         u64 last_ns = SotcStats::NowNs();
         bool last_busy = false;
         int last_who = 0; // GPU idle: 0 draw thread busy, 1 command processor busy, 2 game
+        // "SOTC GPU WAITS": the state of the last sample, and a subset it also counts toward.
+        u32 last_wait = SotcStats::GwQueue;
+        u32 last_extra = SotcStats::GwStates;
         while (!stoken.stop_requested()) {
             work_semaphore.Refresh();
             const u64 gpu = work_semaphore.KnownGpuTick();
             const u64 sub = work_semaphore.CurrentTick();
+            const u64 queued = RecordedSubmitTick();
             // CurrentTick is the one being recorded: work is queued when the GPU is behind the
             // last submitted one (sub - 1). The interval goes to the state seen at its start.
             const u64 now_ns = SotcStats::NowNs();
+            const u64 interval = now_ns - last_ns;
             (last_busy ? SotcStats::gpu_busy_ns : SotcStats::gpu_idle_ns)
-                .fetch_add(now_ns - last_ns, std::memory_order_relaxed);
+                .fetch_add(interval, std::memory_order_relaxed);
             if (!last_busy) {
                 (last_who == 0   ? SotcStats::gpu_idle_draw_ns
                  : last_who == 1 ? SotcStats::gpu_idle_cp_ns
                                  : SotcStats::gpu_idle_game_ns)
-                    .fetch_add(now_ns - last_ns, std::memory_order_relaxed);
+                    .fetch_add(interval, std::memory_order_relaxed);
+            }
+            SotcStats::gpu_wait_ns[last_wait].fetch_add(interval, std::memory_order_relaxed);
+            if (last_extra != SotcStats::GwStates) {
+                SotcStats::gpu_wait_ns[last_extra].fetch_add(interval, std::memory_order_relaxed);
             }
             last_ns = now_ns;
             last_busy = gpu + 1 < sub;
-            last_who = !SotcStats::draw_idle_now.load(std::memory_order_relaxed)  ? 0
-                       : !SotcStats::cp_idle_now.load(std::memory_order_relaxed) ? 1
-                                                                                  : 2;
+            const bool draw_idle = SotcStats::draw_idle_now.load(std::memory_order_relaxed);
+            const bool cp_idle = SotcStats::cp_idle_now.load(std::memory_order_relaxed);
+            last_who = !draw_idle ? 0 : !cp_idle ? 1 : 2;
+            // The finer split: "busy" counts work the recording thread has not put on the queue
+            // yet, and "idle" may have commands the draw thread recorded but not submitted.
+            const bool pending = SotcStats::commands.load(std::memory_order_relaxed) !=
+                                 SotcStats::commands_at_submit.load(std::memory_order_relaxed);
+            const u32 wait = SotcStats::draw_wait_now.load(std::memory_order_relaxed);
+            const bool had_work = last_wait <= SotcStats::GwRecorder;
+            last_extra = SotcStats::GwStates;
+            if (gpu < queued) {
+                last_wait = SotcStats::GwQueue;
+            } else if (queued + 1 < sub) {
+                last_wait = SotcStats::GwRecorder;
+            } else if (!draw_idle && wait != 0) {
+                switch (static_cast<SotcStats::SplitPart>(wait - 1)) {
+                case SotcStats::SplitWaitGpu:
+                    last_wait = SotcStats::GwDrawWaitGpu;
+                    break;
+                case SotcStats::SplitWaitSubmit:
+                    last_wait = SotcStats::GwDrawWaitSubmit;
+                    break;
+                case SotcStats::SplitWaitRecorder:
+                    last_wait = SotcStats::GwDrawWaitRecorder;
+                    break;
+                case SotcStats::SplitWaitFrame:
+                    last_wait = SotcStats::GwDrawWaitFrame;
+                    break;
+                default:
+                    last_wait = SotcStats::GwDrawWaitTexLock;
+                    break;
+                }
+                if (pending) {
+                    last_extra = SotcStats::GwDrawWaitPending;
+                }
+            } else if (!draw_idle) {
+                last_wait = !pending ? SotcStats::GwDrawWork
+                            : SotcStats::draw_in_pass.load(std::memory_order_relaxed)
+                                ? SotcStats::GwDrawPendingPass
+                                : SotcStats::GwDrawPending;
+            } else if (pending) {
+                last_wait = SotcStats::GwIdlePending;
+            } else {
+                last_wait = !cp_idle ? SotcStats::GwCp : SotcStats::GwGame;
+            }
+            if (had_work && last_wait > SotcStats::GwRecorder) {
+                SotcStats::gpu_idle_stretches.fetch_add(1, std::memory_order_relaxed);
+            }
             if (gpu != last_gpu || sub != last_sub) {
                 SotcStats::PushTick(0, gpu, sub);
                 last_gpu = gpu;
@@ -157,6 +211,9 @@ void Scheduler::BeginRendering(const RenderState& new_state, u64 token) {
     EndRendering();
     SotcGpuTimes::Note(SotcGpuTimes::CPass); // sotc: SOTC_GPU_TIMES
     is_rendering = true;
+    if (tickwatch) { // sotc: "SOTC GPU WAITS"
+        SotcStats::draw_in_pass.store(true, std::memory_order_relaxed);
+    }
     render_state = new_state;
     render_state_token = token;
 
@@ -216,6 +273,9 @@ void Scheduler::EndRendering() {
         SotcStats::render_breaks.fetch_add(1, std::memory_order_relaxed);
     }
     is_rendering = false;
+    if (tickwatch) { // sotc: "SOTC GPU WAITS"
+        SotcStats::draw_in_pass.store(false, std::memory_order_relaxed);
+    }
     // sotc: the graphics command buffer even while a cull dispatch is recorded (SOTC_CULL_QUEUE).
     sessions.back().primary.endRendering();
 }
@@ -544,6 +604,9 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
     if (tickwatch) {
         SotcStats::PushTick(1, signal_value,
                             (static_cast<u64>(info.num_wait_semas) << 8) | cmd_buffers.size());
+        // "SOTC GPU WAITS": the draw thread's commands so far are in this submit.
+        SotcStats::commands_at_submit.store(SotcStats::commands.load(std::memory_order_relaxed),
+                                            std::memory_order_relaxed);
     }
 
     if (recorder) {

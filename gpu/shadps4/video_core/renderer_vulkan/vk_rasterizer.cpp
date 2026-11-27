@@ -3354,7 +3354,8 @@ void Rasterizer::FlushPeriodic() {
     // when the command processor was slower; on by default since 2026-10-16 (SOTC_RB_EARLY=0
     // off): attract demo 53.6/54.5 -> 55.3/55.7 FPS (open world: 400-490 readbacks/s waited
     // ~10% of the thread), Shrine unchanged (34.2 vs 34.1).
-    if (SotcStats::kFpsLog) { // sotc: read only by the SOTC_FPS printer (sotc_stats.h)
+    // sotc: read only by the SOTC_FPS printer (sotc_stats.h) and the SOTC_TICKWATCH watcher.
+    if (SotcStats::kFpsLog || SotcStats::kTickWatch) {
         // sotc: written by this thread only: a plain add, no lock prefix (an atomic RMW here
         // waits for the thread's pending stores, ~1.8% of it). The printer takes deltas.
         SotcStats::commands.store(SotcStats::commands.load(std::memory_order_relaxed) + 1,

@@ -406,6 +406,18 @@ inline void NoteSlowOp(uint64_t key, uint64_t ticks) {
     op.ticks += ticks;
     ++op.count;
 }
+/// sotc: SOTC_TICKWATCH=1 -- a watcher thread on the draw scheduler samples its timeline
+/// semaphore (vk_scheduler.cpp StartTickWatch); submits and GPU progress land in this ring and
+/// the FLIPGAP detector (videoout/driver.cpp) prints what the timeline did during a gap.
+/// Diagnostic: off by default, never on in benchmarks.
+inline const bool kTickWatch = [] {
+    const char* v = std::getenv("SOTC_TICKWATCH");
+    return v && v[0] == '1';
+}();
+/// sotc: SOTC_TICKWATCH: the wait the draw thread is blocked in (its SplitPart + 1, set by
+/// SplitTimer below for the SplitWait* parts and SplitTexLock), 0 while it works or is out of
+/// work. Read by the tick watcher ("SOTC GPU WAITS").
+inline std::atomic<uint32_t> draw_wait_now{0};
 enum SplitPart {
     SplitDraw, SplitIndirect, SplitDispatch, SplitFunc, SplitCommands, // draw thread operations
     SplitBind, SplitBindBuffers, SplitBindTextures, SplitBindDma,      // inside BindResources
@@ -450,15 +462,30 @@ struct SlowCommand {
         }
     }
 };
+/// The parts during which the draw thread is blocked (SOTC_TICKWATCH marks them, draw_wait_now).
+constexpr bool IsDrawWait(SplitPart p) {
+    return (p >= SplitWaitGpu && p <= SplitWaitFrame) || p == SplitTexLock;
+}
 struct SplitTimer {
     SplitPart part;
     bool on;
+    bool wait_mark = false;
+    uint32_t wait_prev = 0;
     uint64_t start;
     explicit SplitTimer(SplitPart p, bool draw_thread_only = true)
-        : part{p}, on{kDrawSplit && (!draw_thread_only || t_draw_thread)}, start{on ? Ticks() : 0} {}
+        : part{p}, on{kDrawSplit && (!draw_thread_only || t_draw_thread)}, start{on ? Ticks() : 0} {
+        if (kTickWatch && IsDrawWait(p) && t_draw_thread) {
+            wait_mark = true;
+            wait_prev = draw_wait_now.load(std::memory_order_relaxed);
+            draw_wait_now.store(static_cast<uint32_t>(p) + 1, std::memory_order_relaxed);
+        }
+    }
     ~SplitTimer() {
         if (on) {
             split_ticks[part].fetch_add(Ticks() - start, std::memory_order_relaxed);
+        }
+        if (wait_mark) {
+            draw_wait_now.store(wait_prev, std::memory_order_relaxed);
         }
     }
 };
@@ -775,14 +802,6 @@ struct FrameTimer {
     }
 };
 
-/// sotc: SOTC_TICKWATCH=1 -- a watcher thread on the draw scheduler samples its timeline
-/// semaphore (vk_scheduler.cpp StartTickWatch); submits and GPU progress land in this ring and
-/// the FLIPGAP detector (videoout/driver.cpp) prints what the timeline did during a gap.
-/// Diagnostic: off by default, never on in benchmarks.
-inline const bool kTickWatch = [] {
-    const char* v = std::getenv("SOTC_TICKWATCH");
-    return v && v[0] == '1';
-}();
 struct TickEvent {
     int64_t t_ns;  ///< steady_clock time_since_epoch (NowNs)
     uint64_t gpu;  ///< kind 0: known GPU tick; kind 1/2: the tick submitted
@@ -799,6 +818,36 @@ inline std::atomic<uint64_t> gpu_busy_ns{0}, gpu_idle_ns{0}, gpu_busy_frames{0};
 /// flags are set by the threads themselves around their idle waits.
 inline std::atomic<bool> draw_idle_now{false}, cp_idle_now{false};
 inline std::atomic<uint64_t> gpu_idle_draw_ns{0}, gpu_idle_cp_ns{0}, gpu_idle_game_ns{0};
+/// sotc: SOTC_TICKWATCH: `commands` (draws and dispatches the draw thread recorded) as of the draw
+/// scheduler's last submit, and whether the draw thread is inside a render pass: tells the GPU
+/// waiting for commands already recorded but not submitted yet from waiting for new ones.
+inline std::atomic<uint64_t> commands_at_submit{0};
+inline std::atomic<bool> draw_in_pass{false};
+/// sotc: SOTC_TICKWATCH ("SOTC GPU WAITS"): the sampled time split by what the GPU waits for.
+/// "busy" above is GwQueue + GwRecorder; the rest is its "idle".
+enum GpuWait : uint32_t {
+    GwQueue,           ///< the GPU has work on the Vulkan queue
+    GwRecorder,        ///< none there: the recording thread still holds submitted command buffers
+    GwDrawWork,        ///< all done; the draw thread works, nothing recorded since its last submit
+    GwDrawPending,     ///< ... with commands recorded since then, outside a render pass
+    GwDrawPendingPass, ///< ... with commands recorded since then, inside a render pass
+    GwDrawWaitGpu,     ///< all done; the draw thread blocked waiting for the GPU (SplitWaitGpu),
+    GwDrawWaitSubmit,  ///< for a submit by the recording thread (SplitWaitSubmit),
+    GwDrawWaitRecorder,///< for the recording thread (SplitWaitRecorder),
+    GwDrawWaitFrame,   ///< for a presentation frame (SplitWaitFrame),
+    GwDrawWaitTexLock, ///< for the texture cache lock (SplitTexLock)
+    GwDrawWaitPending, ///< the part of the blocked time with commands not submitted yet (a subset)
+    GwIdlePending,     ///< the draw thread out of work with commands not submitted yet
+    GwCp,              ///< the draw thread out of work, the command processor busy
+    GwGame,            ///< both out of work, nothing pending (the game sent nothing)
+    GwStates
+};
+inline std::atomic<uint64_t> gpu_wait_ns[GwStates]{};
+/// sotc: SOTC_TICKWATCH: samples where the GPU went from having work to having none.
+inline std::atomic<uint64_t> gpu_idle_stretches{0};
+/// sotc: the texture cache lock (ReentrantMutex): barriers the threads other than its biased
+/// owner run before taking it, and how often that owner had to queue behind one of them.
+inline std::atomic<uint64_t> tc_slow_barriers{0}, tc_fast_queued{0};
 inline constexpr size_t kTickRing = 8192;
 inline TickEvent tick_ring[kTickRing];
 inline std::atomic<uint64_t> tick_ring_head{0};

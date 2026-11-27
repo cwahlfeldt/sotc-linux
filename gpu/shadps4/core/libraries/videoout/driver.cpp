@@ -795,6 +795,36 @@ void VideoOutDriver::Flip(const Request& req) {
                              SotcStats::gpu_idle_draw_ns.exchange(0) / 1e6 / frames,
                              SotcStats::gpu_idle_cp_ns.exchange(0) / 1e6 / frames,
                              SotcStats::gpu_idle_game_ns.exchange(0) / 1e6 / frames);
+                // The finer split of the same samples (sotc_stats.h GpuWait).
+                double w[SotcStats::GwStates];
+                for (u32 i = 0; i < SotcStats::GwStates; ++i) {
+                    w[i] = SotcStats::gpu_wait_ns[i].exchange(0) / 1e6 / frames;
+                }
+                using namespace SotcStats;
+                const double working = w[GwDrawWork] + w[GwDrawPending] + w[GwDrawPendingPass];
+                const double blocked = w[GwDrawWaitGpu] + w[GwDrawWaitSubmit] +
+                                       w[GwDrawWaitRecorder] + w[GwDrawWaitFrame] +
+                                       w[GwDrawWaitTexLock];
+                const double idle_split =
+                    working + blocked + w[GwIdlePending] + w[GwCp] + w[GwGame];
+                ReportPrintf(report,
+                             "SOTC GPU WAITS per frame: queue %.1f ms, recorder %.1f; GPU idle %.1f = "
+                             "draw thread working %.1f (with unsubmitted commands %.1f, %.1f of it "
+                             "in a render pass), blocked %.1f [gpu %.1f, submit %.1f, recorder "
+                             "%.1f, frame %.1f, texture lock %.1f; with unsubmitted commands %.1f], "
+                             "out of work with unsubmitted commands %.1f; command processor %.1f, "
+                             "game %.1f; %.1f idle stretches\n",
+                             w[GwQueue], w[GwRecorder], idle_split, working,
+                             w[GwDrawPending] + w[GwDrawPendingPass], w[GwDrawPendingPass], blocked,
+                             w[GwDrawWaitGpu], w[GwDrawWaitSubmit], w[GwDrawWaitRecorder],
+                             w[GwDrawWaitFrame], w[GwDrawWaitTexLock], w[GwDrawWaitPending],
+                             w[GwIdlePending], w[GwCp], w[GwGame],
+                             SotcStats::gpu_idle_stretches.exchange(0) / static_cast<double>(frames));
+                ReportPrintf(report,
+                             "SOTC TC LOCK: %.0f/s barriers by other threads, the draw thread queued "
+                             "behind them %.0f/s\n",
+                             SotcStats::tc_slow_barriers.exchange(0) / seconds,
+                             SotcStats::tc_fast_queued.exchange(0) / seconds);
             }
             ReportPrintf(report,
                          "SOTC readback finish:%llu for bytes the guest asked, %llu binds, "
@@ -1083,8 +1113,13 @@ void VideoOutDriver::Flip(const Request& req) {
             if (flips) {
                 const double idle_ms = SotcStats::draw_idle_ns.exchange(0) / 1e6;
                 const double parse_ms = SotcStats::cp_parse_ns.exchange(0) / 1e6;
-                std::fprintf(stderr, "SOTC threads per frame: draw busy %.2f ms, command parse %.2f ms\n",
-                             (seconds * 1000.0 - idle_ms) / flips, parse_ms / flips);
+                // sotc: the recorder's time replaying commands (not spinning or sleeping).
+                const double recorder_ms = SotcStats::recorder_busy_ns.exchange(0) / 1e6;
+                std::fprintf(stderr,
+                             "SOTC threads per frame: draw busy %.2f ms, command parse %.2f ms, "
+                             "recorder busy %.2f ms\n",
+                             (seconds * 1000.0 - idle_ms) / flips, parse_ms / flips,
+                             recorder_ms / flips);
             }
             if (SotcStats::kDrawSplit && split_frames && split_tick0) {
                 const double ns = double(SotcStats::NowNs() - split_ns0);
