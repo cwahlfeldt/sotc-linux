@@ -54,7 +54,31 @@
   thread that held it. The spin now only reads the lock until it looks free, with a short backoff.
   In a model of the job loop (4 workers relocking, a thread pushing a job every 50 µs) the pushing
   thread's wait for the lock went from 6–10 µs to 1.3–1.6 µs on average (99th percentile 24–33 →
-  7–9 µs). `SOTC_MUTEX_SPIN_READ=0` restores the old spin.
+  7–9 µs). `SOTC_MUTEX_SPIN_READ=0` restores the old spin. In the game (scripted Shrine run,
+  21:9) the compare-and-swaps went from 37.5% to 8% of a worker's time, but the workers still
+  wait about as long (the lock really is held) and the frame rate did not change.
+- ⚡ **The temple and its surroundings run faster: the GPU no longer waits for work the port
+  already has.** The draw thread hands its commands to the GPU every 1 ms, but inside a render
+  pass only every 4 ms. At the temple the GPU finished its work and then sat idle 6 ms per frame
+  while the draw thread held the next commands. Now a thread waits on the GPU's progress, and as
+  soon as the GPU has nothing left, the commands recorded at least 100 µs ago go to it, inside a
+  render pass too. Scripted Shrine run at 21:9, uncapped, the heavy view at the altar after the
+  save's cutscene (~12,300 commands per frame): **~49.5 → ~57.8 FPS**, GPU idle 6.5 → 3.3 ms per
+  frame (the whole 60 s window 63.0 → 73.0 FPS); the image is unchanged. `SOTC_FLUSH_STARVED=<µs>`
+  sets the age (default 100; 200 gave ~57.1 FPS), `0` turns it off; `SOTC FLUSH STARVED` in the log
+  counts those submits (~3,900/s there).
+- 🔒 **The texture cache lock no longer stalls the draw thread on Linux**: the lock is biased to
+  the draw thread, but on Linux the draw thread still ran a full memory fence on every hold
+  (6.5% of its time at the temple). The rare holders on other threads now use the kernel's
+  `membarrier` instead (as Windows uses `FlushProcessWriteBuffers`): with the change above, the
+  heavy temple view **~57.8 → ~59.1 FPS**, the draw thread ~0.6 ms per frame less busy.
+  `SOTC_TC_MEMBARRIER=0` restores the fences; kernels without `membarrier` keep them.
+  `ninja -C out/gpu tc-mutex-test` checks the lock both ways.
+- Diagnostics: with `SOTC_TICKWATCH=1` the log splits the GPU's idle time by what it waits for
+  (`SOTC GPU WAITS`: work held by the recorder, commands the draw thread has not submitted yet,
+  inside a render pass or not, its waits, the game) and counts the texture cache lock's slow
+  holds (`SOTC TC LOCK`); the threads-per-frame line also gives the recorder's busy time. The
+  gameplay benchmark keeps a second screenshot of the view its window ended on.
 - 🔊 **Sound threads first, as the game asks**: the threads the game runs at the top PS4
   priority (`sndx_*`, `SoundSystemSndx`) run 6 nice levels above the rest where `RLIMIT_NICE`
   allows. On 4 CPU threads or fewer the Windows rule (#267) now applies on Linux too: job workers
