@@ -21,7 +21,7 @@ namespace VideoCore {
 bool ReentrantMutex::InitLightFence() {
 #if defined(__linux__)
     const char* v = std::getenv("SOTC_TC_MEMBARRIER");
-    if (!v || v[0] != '1') {
+    if (v && v[0] == '0') {
         return false;
     }
     // Registered once for the process; the expedited command then needs no further setup.
@@ -33,7 +33,7 @@ bool ReentrantMutex::InitLightFence() {
         return false;
     }
     std::fprintf(stderr, "SOTC TC LOCK: membarrier barrier, the draw thread's fence left out "
-                         "(SOTC_TC_MEMBARRIER)\n");
+                         "(SOTC_TC_MEMBARRIER=0: fences)\n");
     return true;
 #else
     return false;

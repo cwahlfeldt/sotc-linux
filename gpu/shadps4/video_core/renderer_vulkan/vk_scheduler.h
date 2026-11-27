@@ -382,9 +382,9 @@ public:
     /// (the presenter starts it on the draw scheduler; the FLIPGAP detector prints it).
     void StartTickWatch();
 
-    /// sotc: SOTC_FLUSH_STARVED=<us> (0, the default: off): the minimum age of the commands
+    /// sotc: SOTC_FLUSH_STARVED=<us> (default 100, 0 off): the minimum age of the commands
     /// recorded since the last submit before a GPU that has run out of work gets them, inside a
-    /// render pass too (Rasterizer::FlushPeriodic).
+    /// render pass too (Rasterizer::FlushPeriodic, where the periodic submit is on).
     static u32 FlushStarvedUs();
 
     /// sotc: with SOTC_FLUSH_STARVED and the recording thread, a thread waits on this scheduler's

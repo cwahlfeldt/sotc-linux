@@ -145,7 +145,7 @@ void Scheduler::StartTickWatch() {
 u32 Scheduler::FlushStarvedUs() {
     static const u32 us = [] {
         const char* v = std::getenv("SOTC_FLUSH_STARVED");
-        return v ? static_cast<u32>(std::strtoul(v, nullptr, 10)) : 0u;
+        return v ? static_cast<u32>(std::strtoul(v, nullptr, 10)) : 100u;
     }();
     return us;
 }
@@ -155,7 +155,9 @@ void Scheduler::StartDrainWatch() {
         return;
     }
     if (!recorder) {
-        LOG_WARNING(Render_Vulkan, "SOTC_FLUSH_STARVED needs the recording thread: off");
+        if (std::getenv("SOTC_FLUSH_STARVED")) {
+            LOG_WARNING(Render_Vulkan, "SOTC_FLUSH_STARVED needs the recording thread: off");
+        }
         return;
     }
     // Blocks in the driver until the GPU finishes the next tick (or the newest one already on

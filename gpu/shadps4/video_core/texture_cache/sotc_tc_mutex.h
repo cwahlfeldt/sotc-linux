@@ -29,7 +29,7 @@ namespace VideoCore {
 ///
 /// On Linux both sides ran a full fence, so the owner's store and load became store, mfence,
 /// load: at the temple (21:9, 60 FPS) ~6.5% of the draw thread waited in that mfence for its
-/// pending stores. SOTC_TC_MEMBARRIER=1 makes the other threads' barrier a
+/// pending stores. SOTC_TC_MEMBARRIER (default on, =0 off) makes the other threads' barrier a
 /// membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED), which runs a full barrier on every CPU running a
 /// thread of the process before it returns, the owner then orders its store and load only for the
 /// compiler, as on Windows (sotc_tc_mutex.cpp; the old fences when the kernel lacks it).
@@ -132,8 +132,8 @@ private:
     /// FlushProcessWriteBuffers on Windows, membarrier with kLightFence, else a full fence
     /// (sotc_tc_mutex.cpp).
     static void AsymmetricBarrier();
-    /// SOTC_TC_MEMBARRIER=1 and the kernel's membarrier registered for the process: fixed for
-    /// the process before any thread takes the lock (static initialisation).
+    /// SOTC_TC_MEMBARRIER not 0 and the kernel's membarrier registered for the process: fixed
+    /// for the process before any thread takes the lock (static initialisation).
     static bool InitLightFence();
     static inline const bool kLightFence = InitLightFence();
 
