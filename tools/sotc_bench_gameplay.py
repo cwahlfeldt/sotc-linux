@@ -3,7 +3,7 @@
 """sotc (Linux): gameplay benchmark through sotc.py, the native build, uncapped 60 FPS mode.
 
     python3 tools/sotc_bench_gameplay.py [--label NAME] [--measure 60] [--move] [--pan X]
-                                         [--skip N] [NAME=VALUE ...]
+                                         [--skip N] [--replay FILE] [NAME=VALUE ...]
 
 The title screen's run is mostly the intro movie; this one plays: scripted pad input
 (BB_PAD_FILE) holds X 4 s at a time (the intro's "hold X to skip", then "Press Any Button" and the
@@ -20,7 +20,9 @@ the camera (it ends up in the bushes, a lighter view). --pan X holds the right s
 camera keeps turning and the window averages every direction: `--pan 200` without --move sweeps
 the temple from the altar (~3,700-12,400 commands per frame). The summary line counts the window's
 seconds in stretches of 5 s or more under 5,000 commands per frame ("cutscene s"): a cutscene
-the skip missed.
+the skip missed. --replay FILE plays back a route the player recorded (BB_PAD_RECORD=FILE, F9 once
+Wander can move at the altar after the cutscene, F9 again at the end) from the window's start;
+the window then lasts the recording unless --measure is given.
 
 NAME=VALUE pairs go to the game's environment (A/B switches, SOTC_PROFILE=...). The window's start
 creates SOTC_PROFILE_START's file, so SOTC_PROFILE / SOTC_THREAD_TIMES with SOTC_PROFILE_DELAY=0
@@ -49,14 +51,25 @@ STARTED = 'st_gameflow() starting game'
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--label', default=time.strftime('run-%H%M%S'))
-    parser.add_argument('--measure', type=float, default=60.0, help='seconds measured (default 60)')
+    parser.add_argument('--measure', type=float,
+                        help='seconds measured (default 60, or the length of --replay)')
     parser.add_argument('--load', type=float, default=40.0,
                         help="at most this many seconds for the save's first view (default 40)")
     parser.add_argument('--move', action='store_true', help='walk and turn the camera first')
     parser.add_argument('--pan', type=int, help='right stick x (0..255) held during the window')
     parser.add_argument('--skip', type=int, default=3, help="X holds to skip the save's cutscene")
+    parser.add_argument('--replay', help='a BB_PAD_RECORD file played back during the window')
     parser.add_argument('env', nargs='*', help='NAME=VALUE for the game')
     args = parser.parse_args()
+    replay_env = []
+    if args.replay:
+        replay = Path(args.replay).resolve()
+        lines = [line.split() for line in replay.read_text().splitlines() if line.strip()]
+        if args.measure is None:
+            args.measure = int(lines[-1][0]) / 1000 + 1 if lines else 60.0
+        replay_env = [f'BB_PAD_REPLAY={replay}']
+    if args.measure is None:
+        args.measure = 60.0
     out = ROOT / 'out' / 'bench'
     out.mkdir(parents=True, exist_ok=True)
     log_path, pad = out / f'{args.label}.log', out / f'{args.label}.pad'
@@ -68,7 +81,8 @@ def main():
     # limit, no dynamic step, no frame generation; the window opens without the focus.
     env = ['SOTC_PREFETCH=0', 'SOTC_MODES=fps60,af16', 'SOTC_FPS_CAP=off', 'SOTC_FPS=1',
            'SOTC_FPS_LIMIT=0', 'SOTC_FPS_DYNAMIC=0', 'SOTC_FRAMEGEN=off', 'SOTC_WINDOW_BEHIND=1',
-           f'BB_PAD_FILE={pad}', f'BB_FRAME_DUMP_TRIGGER={shot}', f'SOTC_PROFILE_START={start_file}', *args.env]
+           f'BB_PAD_FILE={pad}', f'BB_FRAME_DUMP_TRIGGER={shot}', f'SOTC_PROFILE_START={start_file}',
+           *replay_env, *args.env]
     command = [*shlex.split(os.environ.get('SOTC_BENCH_WRAP', '')), 'env', *env,
                'timeout', '--signal=INT', '600', sys.executable, 'sotc.py']
     t0 = time.monotonic()
@@ -137,7 +151,9 @@ def main():
         time.sleep(3)
         begin = len(log_path.read_bytes())
         start_file.touch()
-        if args.pan is not None:
+        if args.replay:
+            pad.write_text('replay')
+        elif args.pan is not None:
             pad.write_text(f'rx={args.pan}')
         note(f'measuring {args.measure:.0f} s')
         time.sleep(5)
