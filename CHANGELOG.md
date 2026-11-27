@@ -66,7 +66,11 @@
   save's cutscene (~12,300 commands per frame): **~49.5 → ~57.8 FPS**, GPU idle 6.5 → 3.3 ms per
   frame (the whole 60 s window 63.0 → 73.0 FPS); the image is unchanged. `SOTC_FLUSH_STARVED=<µs>`
   sets the age (default 100; 200 gave ~57.1 FPS), `0` turns it off; `SOTC FLUSH STARVED` in the log
-  counts those submits (~3,900/s there).
+  counts those submits (~3,900/s there). With the camera turning around the temple from the
+  altar (the cutscene skipped): **60.1 → 69.6 FPS**, looking into the temple 52.5 → 61.1 (lowest
+  second 45 → 52), together with the lock change below. Those submits also no longer ask the driver
+  for the GPU's progress each time (the waiting thread already knows it): another **+3%** (71.1
+  FPS, lowest second 56). `SOTC_DRAIN_TICK=0` asks the driver as before.
 - 🔒 **The texture cache lock no longer stalls the draw thread on Linux**: the lock is biased to
   the draw thread, but on Linux the draw thread still ran a full memory fence on every hold
   (6.5% of its time at the temple). The rare holders on other threads now use the kernel's
@@ -77,8 +81,10 @@
 - Diagnostics: with `SOTC_TICKWATCH=1` the log splits the GPU's idle time by what it waits for
   (`SOTC GPU WAITS`: work held by the recorder, commands the draw thread has not submitted yet,
   inside a render pass or not, its waits, the game) and counts the texture cache lock's slow
-  holds (`SOTC TC LOCK`); the threads-per-frame line also gives the recorder's busy time. The
-  gameplay benchmark keeps a second screenshot of the view its window ended on.
+  holds (`SOTC TC LOCK`); the threads-per-frame line also gives the recorder's busy time, and the
+  per-second `SOTC SCREEN FPS` line the commands per frame (with `SOTC_FPS`). The gameplay
+  benchmark now skips the save's cutscene (it filled most of the measured minute), can keep the
+  camera turning (`--pan 200`) and screenshots each step.
 - 🔊 **Sound threads first, as the game asks**: the threads the game runs at the top PS4
   priority (`sndx_*`, `SoundSystemSndx`) run 6 nice levels above the rest where `RLIMIT_NICE`
   allows. On 4 CPU threads or fewer the Windows rule (#267) now applies on Linux too: job workers
