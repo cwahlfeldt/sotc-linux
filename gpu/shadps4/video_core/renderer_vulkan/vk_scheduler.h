@@ -382,6 +382,24 @@ public:
     /// (the presenter starts it on the draw scheduler; the FLIPGAP detector prints it).
     void StartTickWatch();
 
+    /// sotc: SOTC_FLUSH_STARVED=<us> (0, the default: off): the minimum age of the commands
+    /// recorded since the last submit before a GPU that has run out of work gets them, inside a
+    /// render pass too (Rasterizer::FlushPeriodic).
+    static u32 FlushStarvedUs();
+
+    /// sotc: with SOTC_FLUSH_STARVED and the recording thread, a thread waits on this scheduler's
+    /// timeline and notes each tick the GPU finishes (GpuDrained). The presenter starts it on the
+    /// draw scheduler.
+    void StartDrainWatch();
+
+    /// sotc: the GPU has finished everything submitted, and the recording thread holds no submit
+    /// (false without the drain watch).
+    [[nodiscard]] bool GpuDrained() const noexcept {
+        const u64 queued = recorded_submit_tick.load(std::memory_order_acquire);
+        return drain_watching.load(std::memory_order_relaxed) && queued + 1 >= CurrentTick() &&
+               drained_tick.load(std::memory_order_acquire) >= queued;
+    }
+
     /// Waits until the recording thread has put the submit of tick on the queue. Another
     /// thread that queues work waiting for tick on the same queue must call this first: a wait
     /// queued before its signal blocks the queue for good. kick: the recording thread only.
@@ -605,6 +623,11 @@ private:
     /// sotc: SOTC_TICKWATCH (StartTickWatch); the thread uses work_semaphore, declared above.
     bool tickwatch{};
     std::jthread tickwatch_thread;
+    /// sotc: SOTC_FLUSH_STARVED (StartDrainWatch): newest tick the GPU is known to have finished,
+    /// written by the drain watch thread, which uses work_semaphore (declared above).
+    std::atomic<u64> drained_tick{0};
+    std::atomic<bool> drain_watching{false};
+    std::jthread drain_watch;
     /// Last member: stops (after running everything queued) before the rest is destroyed.
     std::unique_ptr<CommandRecorder> recorder;
 };

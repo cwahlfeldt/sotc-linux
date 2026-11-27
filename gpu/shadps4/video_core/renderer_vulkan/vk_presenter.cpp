@@ -505,6 +505,8 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
       texture_cache{rasterizer->GetTextureCache()} {
     // sotc: SOTC_TICKWATCH samples the draw scheduler's timeline (FLIPGAP diagnosis).
     draw_scheduler.StartTickWatch();
+    // sotc: SOTC_FLUSH_STARVED: tells the draw thread when the GPU ran out of work.
+    draw_scheduler.StartDrainWatch();
     const u32 num_images = swapchain.GetImageCount();
     const vk::Device device = instance.GetDevice();
 

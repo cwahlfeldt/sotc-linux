@@ -532,6 +532,9 @@ inline std::atomic<uint64_t> early_flushes{0}; ///< submits right after a write 
 inline std::atomic<uint64_t> rb_safepoint_finishes{0};
 /// sotc: SOTC_IDLE_FLUSH: submits of recorded commands when the draw thread ran out of work.
 inline std::atomic<uint64_t> idle_flushes{0};
+/// sotc: SOTC_FLUSH_STARVED: submits because the GPU ran out of work, outside and inside a
+/// render pass (the second ones split the pass).
+inline std::atomic<uint64_t> starved_flushes{0}, starved_flushes_pass{0};
 /// Suspects of long frames, printed for each frame over SOTC_STALL_MS (SOTC_FRAME_LOG runs):
 /// pipelines created, shaders recompiled and images created during the frame, and their time.
 inline std::atomic<uint64_t> pipelines_new{0}, pipeline_ns{0};

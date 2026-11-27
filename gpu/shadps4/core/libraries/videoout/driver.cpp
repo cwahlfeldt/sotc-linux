@@ -772,6 +772,14 @@ void VideoOutDriver::Flip(const Request& req) {
                 ReportPrintf(report, "SOTC RB SAFEPOINT: %llu readback finishes served inside long ops\n",
                              static_cast<unsigned long long>(served));
             }
+            if (Vulkan::Scheduler::FlushStarvedUs() != 0) {
+                const u64 outside = SotcStats::starved_flushes.exchange(0);
+                const u64 inside = SotcStats::starved_flushes_pass.exchange(0);
+                ReportPrintf(report,
+                             "SOTC FLUSH STARVED: %.0f submits/s to a GPU out of work (%.0f of "
+                             "them inside a render pass)\n",
+                             (outside + inside) / seconds, inside / seconds);
+            }
             if (const u64 idle_flushes = SotcStats::idle_flushes.exchange(0)) {
                 ReportPrintf(report, "SOTC IDLE FLUSH: %.0f submits/s when the draw thread ran dry\n",
                              idle_flushes / seconds);

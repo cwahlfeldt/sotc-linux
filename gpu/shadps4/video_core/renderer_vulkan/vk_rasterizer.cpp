@@ -3406,6 +3406,20 @@ void Rasterizer::FlushPeriodic() {
         const auto now = std::chrono::steady_clock::now();
         const auto elapsed = now - commands_since;
         const auto limit = std::chrono::microseconds(flush_us);
+        // sotc: SOTC_FLUSH_STARVED=<us>: the GPU has finished everything submitted while the
+        // commands recorded since then wait for the limit (4x inside a render pass): at the
+        // temple (21:9, ~12,000 commands/frame) the GPU sat 6 ms per frame idle that way, 5.8 of
+        // it during a render pass (SOTC GPU WAITS). Submit them once they are that old.
+        static const auto starved_after = std::chrono::microseconds(Scheduler::FlushStarvedUs());
+        const bool starved = starved_after.count() != 0 && elapsed >= starved_after &&
+                             elapsed < (scheduler.IsRendering() ? limit * 4 : limit) &&
+                             scheduler.GpuDrained();
+        if (starved) {
+            (scheduler.IsRendering() ? SotcStats::starved_flushes_pass : SotcStats::starved_flushes)
+                .fetch_add(1, std::memory_order_relaxed);
+            scheduler.Flush();
+            return;
+        }
         if (elapsed < limit || (scheduler.IsRendering() && elapsed < limit * 4)) {
             return;
         }

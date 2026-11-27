@@ -142,6 +142,60 @@ void Scheduler::StartTickWatch() {
     });
 }
 
+u32 Scheduler::FlushStarvedUs() {
+    static const u32 us = [] {
+        const char* v = std::getenv("SOTC_FLUSH_STARVED");
+        return v ? static_cast<u32>(std::strtoul(v, nullptr, 10)) : 0u;
+    }();
+    return us;
+}
+
+void Scheduler::StartDrainWatch() {
+    if (FlushStarvedUs() == 0 || drain_watch.joinable()) {
+        return;
+    }
+    if (!recorder) {
+        LOG_WARNING(Render_Vulkan, "SOTC_FLUSH_STARVED needs the recording thread: off");
+        return;
+    }
+    // Blocks in the driver until the GPU finishes the next tick (or the newest one already on
+    // the queue), so the draw thread learns the GPU ran dry within the wake-up's latency without
+    // asking the driver itself. A wait for a tick not submitted yet is allowed for host waits.
+    drain_watching.store(true, std::memory_order_relaxed);
+    drain_watch = std::jthread([this](std::stop_token stoken) {
+        Common::SetCurrentThreadName("shadPS4:GpuDrainWatch");
+        const vk::Device device = instance.GetDevice();
+        const vk::Semaphore timeline = work_semaphore.Handle();
+        u64 known = 0;
+        while (!stoken.stop_requested()) {
+            const u64 target =
+                std::max(known + 1, recorded_submit_tick.load(std::memory_order_acquire));
+            const vk::SemaphoreWaitInfo wait_info = {
+                .semaphoreCount = 1,
+                .pSemaphores = &timeline,
+                .pValues = &target,
+            };
+            const vk::Result result = device.waitSemaphores(&wait_info, 5'000'000ULL); // 5 ms
+            if (result == vk::Result::eTimeout) {
+                continue;
+            }
+            if (result != vk::Result::eSuccess) {
+                break; // device lost: reported by the waits that need the result
+            }
+            const auto [counter_result, counter] = device.getSemaphoreCounterValue(timeline);
+            if (counter_result != vk::Result::eSuccess) {
+                break;
+            }
+            known = std::max(target, counter);
+            drained_tick.store(known, std::memory_order_release);
+        }
+        drain_watching.store(false, std::memory_order_relaxed);
+    });
+    LOG_WARNING(Render_Vulkan,
+                "SOTC_FLUSH_STARVED: commands {} us old go to a GPU that ran out of work",
+                FlushStarvedUs());
+}
+
 void Scheduler::RecordDeferred(Common::UniqueFunction<void, vk::CommandBuffer>&& func) {
     const vk::CommandBuffer cmdbuf = CommandBuffer();
     if (!recorder || !CommandRecorder::IsFake(cmdbuf)) {
